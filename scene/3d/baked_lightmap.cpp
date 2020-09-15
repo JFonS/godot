@@ -639,7 +639,6 @@ void RaytraceLightBaker::_compute_direct_light(const RaytraceLightBaker::PlotLig
 	OmniLight *omni = Object::cast_to<OmniLight>(light);
 	SpotLight *spot = Object::cast_to<SpotLight>(light);
 	DirectionalLight *directional = Object::cast_to<DirectionalLight>(light);
-	Vector3 light_position = p_plot_light.global_xform.origin;
 
 	float light_range = light->get_param(Light::Param::PARAM_RANGE);
 	float light_attenuation = light->get_param(Light::Param::PARAM_ATTENUATION);
@@ -647,61 +646,132 @@ void RaytraceLightBaker::_compute_direct_light(const RaytraceLightBaker::PlotLig
 	Color c = light->get_color();
 	Vector3 light_energy = Vector3(c.r, c.g, c.b) * light->get_param(Light::Param::PARAM_ENERGY);
 
+	static thread_local std::random_device r;
+	static thread_local std::seed_seq seed{ r(), r(), r(), r(), r(), r(), r(), r() };
+	static thread_local std::mt19937 generator(seed);
+	std::uniform_real_distribution<float> uniform_dist(0.0, 1.0);
+
+	const static int shadowing_rays_per_quality[4] = { 32, 64, 128, 256 };
+	const static int shadowing_rays_check_penumbra_denom = 2;
+
+	// Precompute data for soft shadowing
+	Vector<Vector2> shadowing_disk_samples;
+	int shadowing_ray_count = 1;
+	int shadowing_disk_sample_idx = 0;
+	if (soft_shadowing_enabled) {
+		if (directional && soft_shadowing_directional_radius > 0.0 ||
+				omni && soft_shadowing_omni_radius > 0.0 ||
+				spot && soft_shadowing_spot_radius > 0.0) {
+			shadowing_ray_count = shadowing_rays_per_quality[bake_quality];
+			shadowing_disk_samples.resize(shadowing_ray_count * 4);
+			for (int i = 0; i < shadowing_disk_samples.size(); i++) {
+				float r = Math::sqrt(uniform_dist(generator));
+				float a = uniform_dist(generator) * Math_TAU;
+				shadowing_disk_samples.write[i] = r * Vector2(Math::cos(a), Math::sin(a));
+			}
+		}
+	}
+
+	Vector3 light_position = p_plot_light.global_xform.origin;
+	Vector3 light_direction = -p_plot_light.global_xform.basis.get_axis(Vector3::AXIS_Z).normalized();
+
+	Vector3 light_to_point;
+	Vector3 light_to_point_tan;
+	Vector3 light_to_point_bitan;
+
+	if (directional) {
+		light_to_point = light_direction;
+		Vector3 aux = light_to_point.y < 0.777 ? Vector3(0, 1, 0) : Vector3(1, 0, 0);
+		light_to_point_tan = light_to_point.cross(aux).normalized();
+		light_to_point_bitan = light_to_point.cross(light_to_point_tan).normalized();
+	}
+
 	for (int i = 0; i < p_size; ++i) {
 
 		Vector3 normal = r_lightmap[i].normal;
 		Vector3 position = r_lightmap[i].pos;
-		Vector3 final_energy;
+
+		if (omni || spot) {
+			light_to_point = (position - light_position).normalized();
+			Vector3 aux = light_to_point.y < 0.777 ? Vector3(0, 1, 0) : Vector3(1, 0, 0);
+			light_to_point_tan = light_to_point.cross(aux).normalized();
+			light_to_point_bitan = light_to_point.cross(light_to_point_tan).normalized();
+		}
+
+		if (normal.dot(light_to_point) >= 0.0) continue;
+
+		float dist;
+		if (omni || spot) {
+			dist = position.distance_to(light_position);
+			if (dist > light_range) continue;
+		} else if (directional) {
+			dist = INFINITY;
+		}
+
+		float energy_per_hit = 0;
+		float soft_shadowing_disk_size = 0;
 
 		if (omni) {
-			Vector3 light_direction = (position - light_position).normalized();
-			if (normal.dot(light_direction) >= 0.0) continue;
-			float dist = position.distance_to(light_position);
+			float att = powf(1.0 - dist / light_range, light_attenuation);
 
-			if (dist <= light_range) {
-				RaytraceEngine::Ray ray = RaytraceEngine::Ray(position, -light_direction, bias, dist - bias);
-				if (_cast_shadow_ray(ray)) continue;
-				float att = powf(1.0 - dist / light_range, light_attenuation);
-				final_energy = light_energy * att * MAX(0, normal.dot(-light_direction));
-			}
+			energy_per_hit = att;
+			soft_shadowing_disk_size = soft_shadowing_omni_radius / dist;
 		}
 
 		if (spot) {
-
-			Vector3 light_direction = (position - light_position).normalized();
-			if (normal.dot(light_direction) >= 0.0) continue;
-
-			Vector3 spot_direction = -p_plot_light.global_xform.basis.get_axis(Vector3::AXIS_Z).normalized();
-			float angle = Math::acos(spot_direction.dot(light_direction));
+			float angle = Math::acos(light_direction.dot(light_to_point));
 			float spot_angle = spot->get_param(Light::Param::PARAM_SPOT_ANGLE);
 
 			if (Math::rad2deg(angle) > spot_angle) continue;
-
-			float dist = position.distance_to(light_position);
-			if (dist > light_range) continue;
-
-			RaytraceEngine::Ray ray = RaytraceEngine::Ray(position, -light_direction, bias, dist);
-			if (_cast_shadow_ray(ray)) continue;
 
 			float normalized_dist = dist * (1.0f / MAX(0.001f, spot->get_param(Light::Param::PARAM_RANGE)));
 			float norm_light_attenuation = Math::pow(MAX(1.0f - normalized_dist, 0.001f), spot->get_param(Light::Param::PARAM_ATTENUATION));
 
 			float spot_cutoff = Math::cos(Math::deg2rad(spot_angle));
-			float scos = MAX(light_direction.dot(spot_direction), spot_cutoff);
+			float scos = MAX(light_to_point.dot(light_direction), spot_cutoff);
 			float spot_rim = (1.0f - scos) / (1.0f - spot_cutoff);
 			norm_light_attenuation *= 1.0f - pow(MAX(spot_rim, 0.001f), spot->get_param(Light::Param::PARAM_SPOT_ATTENUATION));
-			final_energy = light_energy * norm_light_attenuation * MAX(0, normal.dot(-light_direction));
+
+			energy_per_hit = norm_light_attenuation;
+			soft_shadowing_disk_size = soft_shadowing_spot_radius / dist;
 		}
 
 		if (directional) {
-			Vector3 light_direction = -p_plot_light.global_xform.basis.get_axis(Vector3::AXIS_Z).normalized();
-			if (normal.dot(light_direction) >= 0.0) continue;
-			RaytraceEngine::Ray ray = RaytraceEngine::Ray(position, -light_direction, bias);
-			if (_cast_shadow_ray(ray)) continue;
-
-			final_energy = light_energy * MAX(0, normal.dot(-light_direction));
+			energy_per_hit = 1;
+			soft_shadowing_disk_size = soft_shadowing_directional_radius;
 		}
 
+		int hits = 0;
+		Vector3 light_disk_to_point = light_to_point;
+		for (int j = 0; j < shadowing_ray_count; j++) {
+			if (shadowing_ray_count > 1) {
+				// Optimization:
+				// Once already casted an important proportion of rays, if all are hits or misses,
+				// assume we're not in the penumbra so we can infer the rest would have the same result
+				if (j == shadowing_ray_count / shadowing_rays_check_penumbra_denom) {
+					if (hits == j) {
+						// Assume totally lit
+						hits = shadowing_ray_count;
+						break;
+					} else if (hits == 0) {
+						// Assume totally dark
+						hits = 0;
+						break;
+					}
+				}
+
+				Vector2 disk_sample = soft_shadowing_disk_size * shadowing_disk_samples[shadowing_disk_sample_idx];
+				shadowing_disk_sample_idx = (shadowing_disk_sample_idx + 1) % shadowing_disk_samples.size();
+				light_disk_to_point = (light_to_point + disk_sample.x * light_to_point_tan + disk_sample.y * light_to_point_bitan).normalized();
+			}
+
+			RaytraceEngine::Ray ray = RaytraceEngine::Ray(position, -light_disk_to_point, bias, dist);
+			if (_cast_shadow_ray(ray)) continue;
+
+			hits++;
+		}
+
+		Vector3 final_energy = (hits * energy_per_hit / shadowing_ray_count) * light_energy * MAX(0, normal.dot(-light_to_point));
 		r_lightmap[i].direct_light += final_energy * light->get_param(Light::PARAM_INDIRECT_ENERGY);
 		if (light->get_bake_mode() == Light::BAKE_ALL) {
 			r_lightmap[i].output += final_energy;
@@ -2063,6 +2133,39 @@ float BakedLightmap::get_default_texels_per_unit() const {
 	return default_texels_per_unit;
 }
 
+void BakedLightmap::set_soft_shadowing_enabled(bool p_enabled) {
+	soft_shadowing_enabled = p_enabled;
+	_change_notify();
+}
+
+bool BakedLightmap::is_soft_shadowing_enabled() const {
+	return soft_shadowing_enabled;
+}
+
+void BakedLightmap::set_soft_shadowing_directional_radius(float p_radius) {
+	soft_shadowing_directional_radius = MAX(p_radius, 0.0);
+}
+
+float BakedLightmap::get_soft_shadowing_directional_radius() const {
+	return soft_shadowing_directional_radius;
+}
+
+void BakedLightmap::set_soft_shadowing_omni_radius(float p_radius) {
+	soft_shadowing_omni_radius = MAX(p_radius, 0.0);
+}
+
+float BakedLightmap::get_soft_shadowing_omni_radius() const {
+	return soft_shadowing_omni_radius;
+}
+
+void BakedLightmap::set_soft_shadowing_spot_radius(float p_radius) {
+	soft_shadowing_spot_radius = MAX(p_radius, 0.0);
+}
+
+float BakedLightmap::get_soft_shadowing_spot_radius() const {
+	return soft_shadowing_spot_radius;
+}
+
 void BakedLightmap::set_capture_enabled(bool p_enable) {
 	capture_enabled = p_enable;
 	_change_notify();
@@ -2170,6 +2273,10 @@ BakedLightmap::BakeError BakedLightmap::bake(Node *p_from_node, bool p_create_vi
 	baker.sky_data = environment_data;
 	baker.sky_size = environment_size;
 	baker.sky_orientation = environment_transform;
+	baker.soft_shadowing_enabled = soft_shadowing_enabled;
+	baker.soft_shadowing_directional_radius = soft_shadowing_directional_radius;
+	baker.soft_shadowing_omni_radius = soft_shadowing_omni_radius;
+	baker.soft_shadowing_spot_radius = soft_shadowing_spot_radius;
 
 	baker.local_bounds = AABB(-extents, extents * 2);
 	baker.global_bounds = get_global_transform().xform(baker.local_bounds);
@@ -2480,6 +2587,8 @@ PoolVector<Face3> BakedLightmap::get_faces(uint32_t p_usage_flags) const {
 void BakedLightmap::_validate_property(PropertyInfo &property) const {
 	if (property.name.begins_with("capture") && property.name != "capture_enabled" && !capture_enabled) {
 		property.usage = 0;
+	} else if (property.name.begins_with("soft_shadowing") && property.name != "soft_shadowing_enabled" && !soft_shadowing_enabled) {
+		property.usage = 0;
 	}
 
 	if (property.name == "environment_custom_sky" && environment_mode != ENVIRONMENT_MODE_CUSTOM_SKY) {
@@ -2553,6 +2662,18 @@ void BakedLightmap::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_capture_propagation", "propagation"), &BakedLightmap::set_capture_propagation);
 	ClassDB::bind_method(D_METHOD("get_capture_propagation"), &BakedLightmap::get_capture_propagation);
 
+	ClassDB::bind_method(D_METHOD("set_soft_shadowing_enabled", "enabled"), &BakedLightmap::set_soft_shadowing_enabled);
+	ClassDB::bind_method(D_METHOD("is_soft_shadowing_enabled"), &BakedLightmap::is_soft_shadowing_enabled);
+
+	ClassDB::bind_method(D_METHOD("set_soft_shadowing_directional_radius", "radius"), &BakedLightmap::set_soft_shadowing_directional_radius);
+	ClassDB::bind_method(D_METHOD("get_soft_shadowing_directional_radius"), &BakedLightmap::get_soft_shadowing_directional_radius);
+
+	ClassDB::bind_method(D_METHOD("set_soft_shadowing_omni_radius", "radius"), &BakedLightmap::set_soft_shadowing_omni_radius);
+	ClassDB::bind_method(D_METHOD("get_soft_shadowing_omni_radius"), &BakedLightmap::get_soft_shadowing_omni_radius);
+
+	ClassDB::bind_method(D_METHOD("set_soft_shadowing_spot_radius", "radius"), &BakedLightmap::set_soft_shadowing_spot_radius);
+	ClassDB::bind_method(D_METHOD("get_soft_shadowing_spot_radius"), &BakedLightmap::get_soft_shadowing_spot_radius);
+
 	ClassDB::bind_method(D_METHOD("set_capture_enabled", "enabled"), &BakedLightmap::set_capture_enabled);
 	ClassDB::bind_method(D_METHOD("get_capture_enabled"), &BakedLightmap::get_capture_enabled);
 
@@ -2582,6 +2703,12 @@ void BakedLightmap::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "environment_custom_sky", PROPERTY_HINT_RESOURCE_TYPE, "Sky"), "set_environment_custom_sky", "get_environment_custom_sky");
 	ADD_PROPERTY(PropertyInfo(Variant::COLOR, "environment_custom_color", PROPERTY_HINT_COLOR_NO_ALPHA), "set_environment_custom_color", "get_environment_custom_color");
 	ADD_PROPERTY(PropertyInfo(Variant::REAL, "environment_custom_energy", PROPERTY_HINT_RANGE, "0,64,0.01"), "set_environment_custom_energy", "get_environment_custom_energy");
+
+	ADD_GROUP("Soft Shadowing", "soft_shadowing_");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "soft_shadowing_enabled"), "set_soft_shadowing_enabled", "is_soft_shadowing_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::REAL, "soft_shadowing_directional_radius", PROPERTY_HINT_RANGE, "0.0,2.0,0.01,or_greater"), "set_soft_shadowing_directional_radius", "get_soft_shadowing_directional_radius");
+	ADD_PROPERTY(PropertyInfo(Variant::REAL, "soft_shadowing_omni_radius", PROPERTY_HINT_RANGE, "0.0,2.0,0.01,or_greater"), "set_soft_shadowing_omni_radius", "get_soft_shadowing_omni_radius");
+	ADD_PROPERTY(PropertyInfo(Variant::REAL, "soft_shadowing_spot_radius", PROPERTY_HINT_RANGE, "0.0,2.0,0.01,or_greater"), "set_soft_shadowing_spot_radius", "get_soft_shadowing_spot_radius");
 
 	ADD_GROUP("Capture", "capture_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "capture_enabled"), "set_capture_enabled", "get_capture_enabled");
@@ -2618,6 +2745,10 @@ BakedLightmap::BakedLightmap() {
 	bake_quality = BAKE_QUALITY_MEDIUM;
 	capture_quality = BAKE_QUALITY_MEDIUM;
 	capture_propagation = 1;
+	soft_shadowing_enabled = false;
+	soft_shadowing_directional_radius = 0.5;
+	soft_shadowing_omni_radius = 0.5;
+	soft_shadowing_spot_radius = 0.5;
 	capture_enabled = false;
 	bounces = 3;
 	image_path = ".";

@@ -134,7 +134,6 @@ private:
 	BakeQuality bake_quality;
 	bool generate_atlas;
 	int max_atlas_size;
-	bool capture_enabled;
 	int bounces;
 	bool use_denoiser;
 
@@ -143,6 +142,12 @@ private:
 	Color environment_custom_color;
 	float environment_custom_energy;
 
+	bool soft_shadowing_enabled;
+	float soft_shadowing_directional_radius;
+	float soft_shadowing_omni_radius;
+	float soft_shadowing_spot_radius;
+
+	bool capture_enabled;
 	BakeQuality capture_quality;
 	float capture_propagation;
 	float capture_cell_size;
@@ -178,6 +183,18 @@ public:
 
 	void set_default_texels_per_unit(const float &p_extents);
 	float get_default_texels_per_unit() const;
+
+	void set_soft_shadowing_enabled(bool p_enabled);
+	bool is_soft_shadowing_enabled() const;
+
+	void set_soft_shadowing_directional_radius(float p_radius);
+	float get_soft_shadowing_directional_radius() const;
+
+	void set_soft_shadowing_omni_radius(float p_radius);
+	float get_soft_shadowing_omni_radius() const;
+
+	void set_soft_shadowing_spot_radius(float p_radius);
+	float get_soft_shadowing_spot_radius() const;
 
 	void set_capture_propagation(float p_propagation);
 	float get_capture_propagation() const;
@@ -297,6 +314,12 @@ class RaytraceLightBaker {
 public:
 	float default_texels_per_unit;
 	BakedLightmap::BakeQuality bake_quality;
+
+	bool soft_shadowing_enabled;
+	float soft_shadowing_directional_radius;
+	float soft_shadowing_omni_radius;
+	float soft_shadowing_spot_radius;
+
 	bool capture_enabled;
 	int bounces;
 	bool use_denoiser;
