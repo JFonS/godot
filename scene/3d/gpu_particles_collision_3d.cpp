@@ -34,6 +34,7 @@
 #include "mesh_instance_3d.h"
 #include "scene/3d/camera_3d.h"
 #include "scene/main/viewport.h"
+#include "scene/resources/surface_tool.h"
 
 void GPUParticlesCollision3D::set_cull_mask(uint32_t p_cull_mask) {
 	cull_mask = p_cull_mask;
@@ -124,6 +125,11 @@ GPUParticlesCollisionBox::~GPUParticlesCollisionBox() {
 ///////////////////////////////
 ///////////////////////////
 
+static _FORCE_INLINE_ float thickness_mult_by_angle(const Vector3 &p_normal) {
+	Vector3 absn = p_normal.abs();
+	return MAX(absn.x, MAX(absn.y, absn.z));
+}
+
 void GPUParticlesCollisionSDF::_find_meshes(const AABB &p_aabb, Node *p_at_node, List<PlotMesh> &plot_meshes) {
 	MeshInstance3D *mi = Object::cast_to<MeshInstance3D>(p_at_node);
 	if (mi && mi->is_visible_in_tree()) {
@@ -189,9 +195,10 @@ uint32_t GPUParticlesCollisionSDF::_create_bvh(LocalVector<BVH> &bvh_tree, FaceP
 			aabb.expand_to(f.vertex[2]);
 			if (p_thickness > 0.0) {
 				Vector3 normal = p_triangles[p_faces[i].index].get_plane().normal;
-				aabb.expand_to(f.vertex[0] - normal * p_thickness);
-				aabb.expand_to(f.vertex[1] - normal * p_thickness);
-				aabb.expand_to(f.vertex[2] - normal * p_thickness);
+				Vector3 nofs = normal * p_thickness * thickness_mult_by_angle(normal);
+				aabb.expand_to(f.vertex[0] - nofs);
+				aabb.expand_to(f.vertex[1] - nofs);
+				aabb.expand_to(f.vertex[2] - nofs);
 			}
 			if (i == 0) {
 				bvh.bounds = aabb;
@@ -229,7 +236,8 @@ void GPUParticlesCollisionSDF::_find_closest_distance(const Vector3 &p_pos, cons
 		Plane p = triangles[p_bvh_cell].get_plane();
 		float d = p.distance_to(point);
 		float inside_d = 1e20;
-		if (d < 0 && d > -thickness) {
+		float th = thickness * thickness_mult_by_angle(p.normal);
+		if (d < 0 && d > -th) {
 			//inside planes, do this in 2D
 
 			Vector3 x_axis = (triangles[p_bvh_cell].vertex[0] - triangles[p_bvh_cell].vertex[1]).normalized();
@@ -266,13 +274,13 @@ void GPUParticlesCollisionSDF::_find_closest_distance(const Vector3 &p_pos, cons
 			//make sure distance to planes is not shorter if inside
 			if (inside_d < 0) {
 				inside_d = MAX(inside_d, d);
-				inside_d = MAX(inside_d, -(thickness + d));
+				inside_d = MAX(inside_d, -(th + d));
 			}
 
 			closest_distance = MIN(closest_distance, inside_d);
 		} else {
 			if (d < 0) {
-				point -= p.normal * thickness; //flatten
+				point -= p.normal * th; //flatten
 			}
 
 			// https://iquilezles.org/www/articles/distfunctions/distfunctions.htm
@@ -293,11 +301,11 @@ void GPUParticlesCollisionSDF::_find_closest_distance(const Vector3 &p_pos, cons
 									SGN(cb.cross(nor).dot(pb)) +
 									SGN(ac.cross(nor).dot(pc)) <
 							2.0) ?
-							MIN(MIN(
+							  MIN(MIN(
 										Vector3_dot2(ba * CLAMP(ba.dot(pa) / Vector3_dot2(ba), 0.0, 1.0) - pa),
 										Vector3_dot2(cb * CLAMP(cb.dot(pb) / Vector3_dot2(cb), 0.0, 1.0) - pb)),
 									Vector3_dot2(ac * CLAMP(ac.dot(pc) / Vector3_dot2(ac), 0.0, 1.0) - pc)) :
-							nor.dot(pa) * nor.dot(pa) / Vector3_dot2(nor));
+							  nor.dot(pa) * nor.dot(pa) / Vector3_dot2(nor));
 
 			closest_distance = MIN(closest_distance, inside_d);
 		}
@@ -352,6 +360,380 @@ void GPUParticlesCollisionSDF::_compute_sdf(ComputeSDFParams *params) {
 	}
 	work_pool.end_work();
 	work_pool.finish();
+}
+
+#include <vector>
+const std::vector<std::vector<int>> marching_cube_cases = {
+	{},
+	{ 3, 10, 0 },
+	{ 11, 3, 2 },
+	{ 11, 0, 2, 11, 10, 0 },
+	{ 10, 7, 4 },
+	{ 3, 4, 0, 3, 7, 4 },
+	{ 10, 2, 4, 2, 7, 4, 2, 11, 7, 10, 3, 2 },
+	{ 11, 0, 2, 11, 4, 0, 11, 7, 4 },
+	{ 7, 11, 6 },
+	{ 7, 0, 6, 0, 11, 6, 0, 3, 11, 7, 10, 0 },
+	{ 7, 2, 6, 7, 3, 2 },
+	{ 7, 2, 6, 7, 0, 2, 7, 10, 0 },
+	{ 10, 6, 4, 10, 11, 6 },
+	{ 3, 4, 0, 3, 6, 4, 3, 11, 6 },
+	{ 10, 6, 4, 10, 2, 6, 10, 3, 2 },
+	{ 4, 2, 6, 4, 0, 2 },
+	{ 8, 1, 0 },
+	{ 8, 3, 10, 8, 1, 3 },
+	{ 8, 3, 0, 8, 11, 3, 8, 2, 11, 8, 1, 2 },
+	{ 8, 11, 10, 8, 2, 11, 8, 1, 2 },
+	{ 8, 7, 4, 8, 1, 7, 1, 10, 7, 1, 0, 10 },
+	{ 8, 7, 4, 8, 3, 7, 8, 1, 3 },
+	{ 8, 7, 4, 8, 11, 7, 8, 2, 11, 8, 1, 2, 3, 0, 10 },
+	{ 8, 7, 4, 8, 11, 7, 8, 2, 11, 8, 1, 2 },
+	{ 8, 6, 7, 11, 6, 1, 0, 7, 11, 6, 8, 1, 0, 8, 7, 11, 1, 0 },
+	{ 8, 7, 10, 8, 6, 7, 8, 11, 6, 8, 3, 11, 8, 1, 3 },
+	{ 8, 3, 0, 8, 7, 3, 8, 6, 7, 8, 2, 6, 8, 1, 2 },
+	{ 8, 7, 10, 8, 6, 7, 8, 2, 6, 8, 1, 2 },
+	{ 8, 6, 4, 8, 11, 6, 8, 1, 11, 1, 10, 11, 1, 0, 10 },
+	{ 8, 6, 4, 8, 11, 6, 8, 3, 11, 8, 1, 3 },
+	{ 8, 6, 4, 8, 2, 6, 8, 1, 2, 3, 0, 10 },
+	{ 8, 6, 4, 8, 2, 6, 8, 1, 2 },
+	{ 1, 9, 2 },
+	{ 1, 10, 0, 1, 9, 10, 9, 3, 10, 9, 2, 3 },
+	{ 1, 11, 3, 1, 9, 11 },
+	{ 1, 10, 0, 1, 11, 10, 1, 9, 11 },
+	{ 1, 4, 10, 9, 7, 4, 10, 7, 2, 7, 9, 2, 4, 1, 9, 2, 1, 10 },
+	{ 1, 4, 0, 1, 7, 4, 1, 9, 7, 9, 3, 7, 9, 2, 3 },
+	{ 1, 10, 3, 1, 4, 10, 1, 7, 4, 1, 11, 7, 1, 9, 11 },
+	{ 1, 4, 0, 1, 7, 4, 1, 11, 7, 1, 9, 11 },
+	{ 1, 11, 2, 1, 7, 11, 1, 6, 7, 1, 9, 6 },
+	{ 1, 10, 0, 1, 7, 10, 1, 6, 7, 1, 9, 6, 2, 3, 11 },
+	{ 1, 7, 3, 1, 6, 7, 1, 9, 6 },
+	{ 1, 10, 0, 1, 7, 10, 1, 6, 7, 1, 9, 6 },
+	{ 1, 11, 2, 1, 10, 11, 1, 4, 10, 1, 6, 4, 1, 9, 6 },
+	{ 1, 4, 0, 1, 6, 4, 1, 9, 6, 2, 3, 11 },
+	{ 1, 10, 3, 1, 4, 10, 1, 6, 4, 1, 9, 6 },
+	{ 1, 4, 0, 1, 6, 4, 1, 9, 6 },
+	{ 8, 2, 0, 8, 9, 2 },
+	{ 8, 3, 10, 8, 2, 3, 8, 9, 2 },
+	{ 8, 3, 0, 8, 11, 3, 8, 9, 11 },
+	{ 8, 11, 10, 8, 9, 11 },
+	{ 8, 7, 4, 8, 2, 7, 2, 10, 7, 2, 0, 10, 8, 9, 2 },
+	{ 8, 7, 4, 8, 3, 7, 8, 2, 3, 8, 9, 2 },
+	{ 8, 7, 4, 8, 11, 7, 8, 9, 11, 3, 0, 10 },
+	{ 8, 7, 4, 8, 11, 7, 8, 9, 11 },
+	{ 8, 2, 0, 8, 11, 2, 8, 7, 11, 8, 6, 7, 8, 9, 6 },
+	{ 8, 7, 10, 8, 6, 7, 8, 9, 6, 2, 3, 11 },
+	{ 8, 3, 0, 8, 7, 3, 8, 6, 7, 8, 9, 6 },
+	{ 8, 7, 10, 8, 6, 7, 8, 9, 6 },
+	{ 8, 6, 4, 8, 9, 6, 2, 10, 11, 2, 0, 10 },
+	{ 8, 6, 4, 8, 9, 6, 2, 3, 11 },
+	{ 8, 6, 4, 8, 9, 6, 3, 0, 10 },
+	{ 8, 6, 4, 8, 9, 6 },
+	{ 5, 8, 4 },
+	{ 5, 10, 4, 5, 3, 10, 5, 0, 3, 5, 8, 0 },
+	{ 5, 2, 11, 8, 3, 2, 11, 3, 4, 3, 8, 4, 2, 5, 8, 4, 5, 11 },
+	{ 5, 10, 4, 5, 11, 10, 5, 2, 11, 5, 0, 2, 5, 8, 0 },
+	{ 5, 10, 7, 5, 8, 10 },
+	{ 5, 3, 7, 5, 0, 3, 5, 8, 0 },
+	{ 5, 11, 7, 5, 2, 11, 5, 3, 2, 5, 10, 3, 5, 8, 10 },
+	{ 5, 11, 7, 5, 2, 11, 5, 0, 2, 5, 8, 0 },
+	{ 5, 11, 6, 5, 8, 11, 8, 7, 11, 8, 4, 7 },
+	{ 5, 11, 6, 5, 3, 11, 5, 0, 3, 5, 8, 0, 4, 7, 10 },
+	{ 5, 2, 6, 5, 3, 2, 5, 8, 3, 8, 7, 3, 8, 4, 7 },
+	{ 5, 2, 6, 5, 0, 2, 5, 8, 0, 4, 7, 10 },
+	{ 5, 11, 6, 5, 10, 11, 5, 8, 10 },
+	{ 5, 11, 6, 5, 3, 11, 5, 0, 3, 5, 8, 0 },
+	{ 5, 2, 6, 5, 3, 2, 5, 10, 3, 5, 8, 10 },
+	{ 5, 2, 6, 5, 0, 2, 5, 8, 0 },
+	{ 5, 0, 4, 5, 1, 0 },
+	{ 5, 10, 4, 5, 3, 10, 5, 1, 3 },
+	{ 5, 0, 4, 5, 3, 0, 5, 11, 3, 5, 2, 11, 5, 1, 2 },
+	{ 5, 10, 4, 5, 11, 10, 5, 2, 11, 5, 1, 2 },
+	{ 5, 10, 7, 5, 0, 10, 5, 1, 0 },
+	{ 5, 3, 7, 5, 1, 3 },
+	{ 5, 11, 7, 5, 2, 11, 5, 1, 2, 3, 0, 10 },
+	{ 5, 11, 7, 5, 2, 11, 5, 1, 2 },
+	{ 5, 11, 6, 5, 0, 11, 0, 7, 11, 0, 4, 7, 5, 1, 0 },
+	{ 5, 11, 6, 5, 3, 11, 5, 1, 3, 10, 4, 7 },
+	{ 5, 2, 6, 5, 1, 2, 3, 4, 7, 3, 0, 4 },
+	{ 5, 2, 6, 5, 1, 2, 4, 7, 10 },
+	{ 5, 11, 6, 5, 10, 11, 5, 0, 10, 5, 1, 0 },
+	{ 5, 11, 6, 5, 3, 11, 5, 1, 3 },
+	{ 5, 2, 6, 5, 1, 2, 3, 0, 10 },
+	{ 5, 2, 6, 5, 1, 2 },
+	{ 1, 4, 2, 4, 9, 2, 4, 5, 9, 1, 8, 4 },
+	{ 1, 8, 0, 2, 5, 9, 2, 4, 5, 2, 10, 4, 2, 3, 10 },
+	{ 1, 11, 3, 1, 4, 11, 4, 9, 11, 4, 5, 9, 1, 8, 4 },
+	{ 1, 8, 0, 9, 4, 5, 9, 10, 4, 9, 11, 10 },
+	{ 1, 7, 2, 1, 10, 7, 7, 9, 2, 7, 5, 9, 1, 8, 10 },
+	{ 1, 8, 0, 2, 5, 9, 2, 7, 5, 2, 3, 7 },
+	{ 1, 10, 3, 1, 8, 10, 7, 9, 11, 7, 5, 9 },
+	{ 1, 8, 0, 9, 7, 5, 9, 11, 7 },
+	{ 1, 11, 2, 1, 7, 11, 1, 4, 7, 1, 8, 4, 6, 5, 9 },
+	{ 1, 8, 0, 2, 3, 11, 4, 7, 10, 9, 6, 5 },
+	{ 1, 7, 3, 1, 4, 7, 1, 8, 4, 6, 5, 9 },
+	{ 1, 8, 0, 4, 7, 10, 9, 6, 5 },
+	{ 1, 11, 2, 1, 10, 11, 1, 8, 10, 6, 5, 9 },
+	{ 1, 8, 0, 2, 3, 11, 9, 6, 5 },
+	{ 1, 10, 3, 1, 8, 10, 6, 5, 9 },
+	{ 1, 8, 0, 9, 6, 5 },
+	{ 5, 0, 4, 5, 2, 0, 5, 9, 2 },
+	{ 5, 10, 4, 5, 3, 10, 5, 2, 3, 5, 9, 2 },
+	{ 5, 0, 4, 5, 3, 0, 5, 11, 3, 5, 9, 11 },
+	{ 5, 10, 4, 5, 11, 10, 5, 9, 11 },
+	{ 5, 10, 7, 5, 0, 10, 5, 2, 0, 5, 9, 2 },
+	{ 5, 3, 7, 5, 2, 3, 5, 9, 2 },
+	{ 5, 11, 7, 5, 9, 11, 3, 0, 10 },
+	{ 5, 11, 7, 5, 9, 11 },
+	{ 5, 9, 6, 2, 7, 11, 2, 4, 7, 2, 0, 4 },
+	{ 5, 9, 6, 2, 3, 11, 4, 7, 10 },
+	{ 5, 9, 6, 3, 4, 7, 3, 0, 4 },
+	{ 5, 9, 6, 4, 7, 10 },
+	{ 5, 9, 6, 2, 10, 11, 2, 0, 10 },
+	{ 5, 9, 6, 2, 3, 11 },
+	{ 5, 0, 10, 9, 3, 0, 10, 3, 6, 3, 9, 6, 0, 5, 9, 6, 5, 10 },
+	{ 5, 9, 6 },
+	{ 9, 5, 6 },
+	{ 9, 0, 3, 10, 0, 5, 6, 3, 10, 0, 9, 5, 6, 9, 3, 10, 5, 6 },
+	{ 9, 3, 2, 9, 5, 3, 5, 11, 3, 5, 6, 11 },
+	{ 9, 0, 2, 9, 10, 0, 9, 5, 10, 5, 11, 10, 5, 6, 11 },
+	{ 9, 7, 6, 9, 10, 7, 9, 4, 10, 9, 5, 4 },
+	{ 9, 7, 6, 9, 3, 7, 9, 0, 3, 9, 4, 0, 9, 5, 4 },
+	{ 9, 3, 2, 9, 10, 3, 9, 4, 10, 9, 5, 4, 7, 6, 11 },
+	{ 9, 0, 2, 9, 4, 0, 9, 5, 4, 6, 11, 7 },
+	{ 9, 7, 11, 9, 5, 7 },
+	{ 9, 3, 11, 9, 0, 3, 9, 10, 0, 9, 7, 10, 9, 5, 7 },
+	{ 9, 3, 2, 9, 7, 3, 9, 5, 7 },
+	{ 9, 0, 2, 9, 10, 0, 9, 7, 10, 9, 5, 7 },
+	{ 9, 10, 11, 9, 4, 10, 9, 5, 4 },
+	{ 9, 3, 11, 9, 0, 3, 9, 4, 0, 9, 5, 4 },
+	{ 9, 3, 2, 9, 10, 3, 9, 4, 10, 9, 5, 4 },
+	{ 9, 0, 2, 9, 4, 0, 9, 5, 4 },
+	{ 9, 0, 6, 0, 5, 6, 0, 8, 5, 9, 1, 0 },
+	{ 9, 10, 6, 9, 3, 10, 10, 5, 6, 10, 8, 5, 9, 1, 3 },
+	{ 9, 1, 2, 3, 6, 11, 3, 5, 6, 3, 8, 5, 3, 0, 8 },
+	{ 9, 1, 2, 5, 10, 8, 5, 11, 10, 5, 6, 11 },
+	{ 9, 7, 6, 9, 10, 7, 9, 0, 10, 9, 1, 0, 4, 8, 5 },
+	{ 9, 7, 6, 9, 3, 7, 9, 1, 3, 4, 8, 5 },
+	{ 9, 1, 2, 3, 0, 10, 5, 4, 8, 6, 11, 7 },
+	{ 9, 1, 2, 7, 6, 11, 5, 4, 8 },
+	{ 9, 7, 11, 9, 0, 7, 0, 5, 7, 0, 8, 5, 9, 1, 0 },
+	{ 9, 3, 11, 9, 1, 3, 5, 10, 8, 5, 7, 10 },
+	{ 9, 1, 2, 3, 5, 7, 3, 8, 5, 3, 0, 8 },
+	{ 9, 1, 2, 5, 10, 8, 5, 7, 10 },
+	{ 9, 10, 11, 9, 0, 10, 9, 1, 0, 5, 4, 8 },
+	{ 9, 3, 11, 9, 1, 3, 5, 4, 8 },
+	{ 9, 1, 2, 3, 0, 10, 5, 4, 8 },
+	{ 9, 1, 2, 5, 4, 8 },
+	{ 1, 6, 2, 1, 5, 6 },
+	{ 1, 10, 0, 1, 6, 10, 6, 3, 10, 6, 2, 3, 1, 5, 6 },
+	{ 1, 11, 3, 1, 6, 11, 1, 5, 6 },
+	{ 1, 10, 0, 1, 11, 10, 1, 6, 11, 1, 5, 6 },
+	{ 1, 6, 2, 1, 7, 6, 1, 10, 7, 1, 4, 10, 1, 5, 4 },
+	{ 1, 4, 0, 1, 5, 4, 2, 7, 6, 2, 3, 7 },
+	{ 1, 10, 3, 1, 4, 10, 1, 5, 4, 7, 6, 11 },
+	{ 1, 4, 0, 1, 5, 4, 6, 11, 7 },
+	{ 1, 11, 2, 1, 7, 11, 1, 5, 7 },
+	{ 1, 10, 0, 1, 7, 10, 1, 5, 7, 2, 3, 11 },
+	{ 1, 7, 3, 1, 5, 7 },
+	{ 1, 10, 0, 1, 7, 10, 1, 5, 7 },
+	{ 1, 11, 2, 1, 10, 11, 1, 4, 10, 1, 5, 4 },
+	{ 1, 4, 0, 1, 5, 4, 2, 3, 11 },
+	{ 1, 10, 3, 1, 4, 10, 1, 5, 4 },
+	{ 1, 4, 0, 1, 5, 4 },
+	{ 8, 2, 0, 8, 6, 2, 8, 5, 6 },
+	{ 8, 3, 10, 8, 2, 3, 8, 6, 2, 8, 5, 6 },
+	{ 8, 3, 0, 8, 11, 3, 8, 6, 11, 8, 5, 6 },
+	{ 8, 11, 10, 8, 6, 11, 8, 5, 6 },
+	{ 8, 5, 4, 2, 7, 6, 2, 10, 7, 2, 0, 10 },
+	{ 8, 5, 4, 2, 7, 6, 2, 3, 7 },
+	{ 8, 5, 4, 3, 0, 10, 6, 11, 7 },
+	{ 8, 5, 4, 7, 6, 11 },
+	{ 8, 2, 0, 8, 11, 2, 8, 7, 11, 8, 5, 7 },
+	{ 8, 7, 10, 8, 5, 7, 2, 3, 11 },
+	{ 8, 3, 0, 8, 7, 3, 8, 5, 7 },
+	{ 8, 7, 10, 8, 5, 7 },
+	{ 8, 5, 4, 2, 10, 11, 2, 0, 10 },
+	{ 8, 2, 3, 11, 2, 5, 4, 3, 11, 2, 8, 5, 4, 8, 3, 11, 5, 4 },
+	{ 8, 5, 4, 3, 0, 10 },
+	{ 8, 5, 4 },
+	{ 9, 4, 6, 9, 8, 4 },
+	{ 9, 4, 6, 9, 10, 4, 9, 3, 10, 9, 0, 3, 9, 8, 0 },
+	{ 9, 3, 2, 9, 4, 3, 4, 11, 3, 4, 6, 11, 9, 8, 4 },
+	{ 9, 0, 2, 9, 8, 0, 6, 10, 4, 6, 11, 10 },
+	{ 9, 7, 6, 9, 10, 7, 9, 8, 10 },
+	{ 9, 7, 6, 9, 3, 7, 9, 0, 3, 9, 8, 0 },
+	{ 9, 3, 2, 9, 10, 3, 9, 8, 10, 7, 6, 11 },
+	{ 9, 0, 2, 9, 8, 0, 6, 11, 7 },
+	{ 9, 7, 11, 9, 4, 7, 9, 8, 4 },
+	{ 9, 3, 11, 9, 0, 3, 9, 8, 0, 4, 7, 10 },
+	{ 9, 3, 2, 9, 7, 3, 9, 4, 7, 9, 8, 4 },
+	{ 9, 0, 2, 9, 8, 0, 10, 4, 7 },
+	{ 9, 10, 11, 9, 8, 10 },
+	{ 9, 3, 11, 9, 0, 3, 9, 8, 0 },
+	{ 9, 3, 2, 9, 10, 3, 9, 8, 10 },
+	{ 9, 0, 2, 9, 8, 0 },
+	{ 9, 4, 6, 9, 0, 4, 9, 1, 0 },
+	{ 9, 4, 6, 9, 10, 4, 9, 3, 10, 9, 1, 3 },
+	{ 9, 1, 2, 3, 6, 11, 3, 4, 6, 3, 0, 4 },
+	{ 9, 1, 2, 4, 11, 10, 4, 6, 11 },
+	{ 9, 7, 6, 9, 10, 7, 9, 0, 10, 9, 1, 0 },
+	{ 9, 7, 6, 9, 3, 7, 9, 1, 3 },
+	{ 9, 1, 2, 3, 0, 10, 6, 11, 7 },
+	{ 9, 1, 2, 7, 6, 11 },
+	{ 9, 7, 11, 9, 4, 7, 9, 0, 4, 9, 1, 0 },
+	{ 9, 3, 11, 9, 1, 3, 4, 7, 10 },
+	{ 9, 1, 2, 3, 4, 7, 3, 0, 4 },
+	{ 9, 4, 7, 10, 4, 1, 2, 7, 10, 4, 9, 1, 2, 9, 7, 10, 1, 2 },
+	{ 9, 10, 11, 9, 0, 10, 9, 1, 0 },
+	{ 9, 3, 11, 9, 1, 3 },
+	{ 9, 1, 2, 3, 0, 10 },
+	{ 9, 1, 2 },
+	{ 1, 6, 2, 1, 4, 6, 1, 8, 4 },
+	{ 1, 8, 0, 2, 4, 6, 2, 10, 4, 2, 3, 10 },
+	{ 1, 11, 3, 1, 6, 11, 1, 4, 6, 1, 8, 4 },
+	{ 1, 8, 0, 6, 10, 4, 6, 11, 10 },
+	{ 1, 6, 2, 1, 7, 6, 1, 10, 7, 1, 8, 10 },
+	{ 1, 8, 0, 2, 7, 6, 2, 3, 7 },
+	{ 1, 10, 3, 1, 8, 10, 7, 6, 11 },
+	{ 1, 6, 11, 7, 6, 8, 0, 11, 7, 6, 1, 8, 0, 1, 11, 7, 8, 0 },
+	{ 1, 11, 2, 1, 7, 11, 1, 4, 7, 1, 8, 4 },
+	{ 1, 8, 0, 2, 3, 11, 4, 7, 10 },
+	{ 1, 7, 3, 1, 4, 7, 1, 8, 4 },
+	{ 1, 8, 0, 10, 4, 7 },
+	{ 1, 11, 2, 1, 10, 11, 1, 8, 10 },
+	{ 1, 8, 0, 2, 3, 11 },
+	{ 1, 10, 3, 1, 8, 10 },
+	{ 1, 8, 0 },
+	{ 0, 6, 2, 0, 4, 6 },
+	{ 3, 6, 2, 3, 4, 6, 3, 10, 4 },
+	{ 11, 4, 6, 11, 0, 4, 11, 3, 0 },
+	{ 11, 4, 6, 11, 10, 4 },
+	{ 10, 2, 0, 10, 6, 2, 10, 7, 6 },
+	{ 3, 6, 2, 3, 7, 6 },
+	{ 10, 3, 0, 7, 6, 11 },
+	{ 11, 7, 6 },
+	{ 7, 0, 4, 7, 2, 0, 7, 11, 2 },
+	{ 7, 10, 4, 2, 3, 11 },
+	{ 7, 0, 4, 7, 3, 0 },
+	{ 7, 10, 4 },
+	{ 10, 2, 0, 10, 11, 2 },
+	{ 3, 11, 2 },
+	{ 10, 3, 0 },
+	{}
+};
+
+Ref<ArrayMesh> GPUParticlesCollisionSDF::get_debug_mesh() {
+	Ref<SurfaceTool> st = memnew(SurfaceTool);
+	st->begin(Mesh::PRIMITIVE_TRIANGLES);
+
+	Vector<Ref<Image>> sdf_data = get_texture()->get_data();
+	Vector3i sdf_size = Vector3i(sdf_data[0]->get_width(), sdf_data[0]->get_height(), sdf_data.size());
+	print_line(vformat("%s", sdf_size));
+	float threshold = 0.01f;
+
+	OS &os = *OS::get_singleton();
+	float time_before = os.get_ticks_msec();
+
+	for (int k = -1; k < sdf_size.z; k++) {
+		for (int j = -1; j < sdf_size.y; j++) {
+			for (int i = -1; i < sdf_size.x; i++) {
+#define index_to_offset(idx) Vector3((idx >> 0) % 2 ? 1 : 0, (idx >> 1) % 2 ? 1 : 0, (idx >> 2) % 2 ? 1 : 0)
+#define get_sdf_data(v) (((v).x < 0 || (v).y < 0 || (v).z < 0 || (v).x >= sdf_size.x || (v).y >= sdf_size.y || (v).z >= sdf_size.z) ? 1e20f : sdf_data[(v).z]->get_pixel((v).x, (v).y).r)
+
+				Vector3i p = Vector3(i, j, k);
+				float values[16];
+
+				// Compute tag
+				int tag = 0;
+				for (int ii = 0; ii < 8; ii++) {
+					Vector3i offset = index_to_offset(ii);
+					values[ii] = get_sdf_data(p + offset);
+					tag |= (values[ii] >= threshold) << ii;
+				}
+
+				const std::vector<int> &faces = marching_cube_cases[tag];
+
+				for (int ii = 0; ii < faces.size(); ii += 3) {
+					for (int jj = 0; jj < 3; jj++) {
+						int edge_index = faces[ii + (jj + 1) % 3];
+						int a, b;
+						switch (edge_index) {
+							case 0:
+								a = 0;
+								b = 4;
+								break;
+							case 1:
+								a = 4;
+								b = 5;
+								break;
+							case 2:
+								a = 1;
+								b = 5;
+								break;
+							case 3:
+								a = 0;
+								b = 1;
+								break;
+							case 4:
+								a = 2;
+								b = 6;
+								break;
+							case 5:
+								a = 6;
+								b = 7;
+								break;
+							case 6:
+								a = 3;
+								b = 7;
+								break;
+							case 7:
+								a = 2;
+								b = 3;
+								break;
+							case 8:
+								a = 4;
+								b = 6;
+								break;
+							case 9:
+								a = 5;
+								b = 7;
+								break;
+							case 10:
+								a = 0;
+								b = 2;
+								break;
+							case 11:
+								a = 1;
+								b = 3;
+								break;
+						}
+
+						Vector3 vertex_a = index_to_offset(a);
+						Vector3 vertex_b = index_to_offset(b);
+						float value_a = values[a];
+						float value_b = values[b];
+
+						Vector3 new_vertex_offset = vertex_a * (value_b - threshold) / (value_b - value_a) + vertex_b * (threshold - value_a) / (value_b - value_a);
+						//Vector3 new_vertex_offset = (vertex_a + vertex_b)/2.0f;
+						Vector3 new_vertex = Vector3(p) + new_vertex_offset;
+						new_vertex = (new_vertex / sdf_size) * extents * 2.0f;
+						new_vertex -= extents;
+						st->add_vertex(new_vertex);
+					}
+				}
+			}
+		}
+	}
+
+#undef index_to_offset
+#undef get_sdf_data
+	//st->generate_normals();
+	Ref<ArrayMesh> mesh = st->commit();
+
+	float elapsed = (os.get_ticks_msec() - time_before);
+	print_line(vformat("elapsed %s", elapsed / 1000.0f));
+
+	return mesh;
 }
 
 Vector3i GPUParticlesCollisionSDF::get_estimated_cell_size() const {
@@ -465,7 +847,8 @@ Ref<Image> GPUParticlesCollisionSDF::bake() {
 		face_pos[i].index = i;
 		face_pos[i].center = (faces[i].vertex[0] + faces[i].vertex[1] + faces[i].vertex[2]) / 2;
 		if (th > 0.0) {
-			face_pos[i].center -= faces[i].get_plane().normal * th * 0.5;
+			Vector3 n = faces[i].get_plane().normal;
+			face_pos[i].center -= n * th * 0.5 * thickness_mult_by_angle(n);
 		}
 	}
 
@@ -522,7 +905,7 @@ void GPUParticlesCollisionSDF::_bind_methods() {
 
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "extents", PROPERTY_HINT_RANGE, "0.01,1024,0.01,or_greater"), "set_extents", "get_extents");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "resolution", PROPERTY_HINT_ENUM, "16,32,64,128,256,512"), "set_resolution", "get_resolution");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "thickness", PROPERTY_HINT_RANGE, "0.0,2.0,0.01"), "set_thickness", "get_thickness");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "thickness", PROPERTY_HINT_RANGE, "0.0,2.0,0.01,or_greater"), "set_thickness", "get_thickness");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "texture", PROPERTY_HINT_RESOURCE_TYPE, "Texture3D"), "set_texture", "get_texture");
 
 	BIND_ENUM_CONSTANT(RESOLUTION_16);

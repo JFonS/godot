@@ -2464,6 +2464,9 @@ GPUParticlesCollision3DGizmoPlugin::GPUParticlesCollision3DGizmoPlugin() {
 	gizmo_color.a = 0.15;
 	create_material("shape_material_internal", gizmo_color);
 
+	// gizmo_color.a = 1.0;
+	create_material("shape_material", gizmo_color);
+
 	create_handle_material("handles");
 }
 
@@ -2659,9 +2662,9 @@ void GPUParticlesCollision3DGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 			handles.push_back(ax);
 		}
 
-		p_gizmo->add_lines(lines, material);
-		p_gizmo->add_collision_segments(lines);
-		p_gizmo->add_handles(handles, handles_material);
+		//	p_gizmo->add_lines(lines, material);
+		//	p_gizmo->add_collision_segments(lines);
+		//p_gizmo->add_handles(handles, handles_material);
 
 		GPUParticlesCollisionSDF *col_sdf = Object::cast_to<GPUParticlesCollisionSDF>(cs);
 		if (col_sdf) {
@@ -2707,7 +2710,14 @@ void GPUParticlesCollision3DGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 				}
 			}
 
-			p_gizmo->add_lines(lines, material_internal);
+			//	p_gizmo->add_lines(lines, material_internal);
+
+			Ref<ArrayMesh> sdf_mesh = col_sdf->get_debug_mesh();
+			Ref<StandardMaterial3D> material = memnew(StandardMaterial3D());
+			material->set_cull_mode(StandardMaterial3D::CULL_DISABLED);
+			//	material->set_shading_mode(StandardMaterial3D::SHADING_MODE_UNSHADED);
+			material->set_albedo(Color(0.5, 0.0, 0.2));
+			p_gizmo->add_mesh(sdf_mesh, false, Ref<SkinReference>(), get_material("shape_material", p_gizmo));
 		}
 	}
 }

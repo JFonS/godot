@@ -182,6 +182,8 @@ public:
 
 	virtual AABB get_aabb() const override;
 
+	Ref<ArrayMesh> get_debug_mesh();
+
 	static BakeBeginFunc bake_begin_function;
 	static BakeStepFunc bake_step_function;
 	static BakeEndFunc bake_end_function;
