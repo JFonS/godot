@@ -1,22 +1,9 @@
-// ======================================================================== //
-// Copyright 2009-2019 Intel Corporation                                    //
-//                                                                          //
-// Licensed under the Apache License, Version 2.0 (the "License");          //
-// you may not use this file except in compliance with the License.         //
-// You may obtain a copy of the License at                                  //
-//                                                                          //
-//     http://www.apache.org/licenses/LICENSE-2.0                           //
-//                                                                          //
-// Unless required by applicable law or agreed to in writing, software      //
-// distributed under the License is distributed on an "AS IS" BASIS,        //
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. //
-// See the License for the specific language governing permissions and      //
-// limitations under the License.                                           //
-// ======================================================================== //
+// Copyright 2009-2020 Intel Corporation
+// SPDX-License-Identifier: Apache-2.0
 
 #pragma once
 
-#include "common.h"
+#include "memory.h"
 #include <vector>
 
 namespace oidn {
@@ -33,7 +20,7 @@ namespace oidn {
     virtual size_t getScratchpadSize() const { return 0; }
     virtual void setScratchpad(const std::shared_ptr<memory>& mem) {}
 
-    virtual void setTile(int h1, int w1, int h2, int w2, int H, int W)
+    virtual void setTile(int hSrc, int wSrc, int hDst, int wDst, int H, int W)
     {
       assert(0); // not supported
     }
@@ -56,16 +43,16 @@ namespace oidn {
     size_t getScratchpadSize() const override
     {
       const auto primDesc = prim.get_primitive_desc();
-      const mkldnn_memory_desc_t* scratchpadDesc = mkldnn_primitive_desc_query_md(primDesc, mkldnn_query_scratchpad_md, 0);
+      const dnnl_memory_desc_t* scratchpadDesc = dnnl_primitive_desc_query_md(primDesc, dnnl_query_scratchpad_md, 0);
       if (scratchpadDesc == nullptr)
         return 0;
-      return mkldnn_memory_desc_get_size(scratchpadDesc);
+      return dnnl_memory_desc_get_size(scratchpadDesc);
     }
 
     void setScratchpad(const std::shared_ptr<memory>& mem) override
     {
       scratchpad = mem;
-      args.insert(std::make_pair(MKLDNN_ARG_SCRATCHPAD, *scratchpad));
+      args.insert(std::make_pair(DNNL_ARG_SCRATCHPAD, *scratchpad));
     }
 
     void execute(stream& sm) override
@@ -90,10 +77,10 @@ namespace oidn {
              const std::shared_ptr<memory>& bias,
              const std::shared_ptr<memory>& dst)
       : MklNode(convolution_forward(desc),
-                { { MKLDNN_ARG_SRC, *src },
-                  { MKLDNN_ARG_WEIGHTS, *weights },
-                  { MKLDNN_ARG_BIAS, *bias },
-                  { MKLDNN_ARG_DST, *dst } }),
+                { { DNNL_ARG_SRC, *src },
+                  { DNNL_ARG_WEIGHTS, *weights },
+                  { DNNL_ARG_BIAS, *bias },
+                  { DNNL_ARG_DST, *dst } }),
                 src(src), weights(weights), bias(bias), dst(dst)
     {}
 
@@ -112,8 +99,28 @@ namespace oidn {
              const std::shared_ptr<memory>& src,
              const std::shared_ptr<memory>& dst)
       : MklNode(pooling_forward(desc),
-                { { MKLDNN_ARG_SRC, *src },
-                  { MKLDNN_ARG_DST, *dst } }),
+                { { DNNL_ARG_SRC, *src },
+                  { DNNL_ARG_DST, *dst } }),
+                src(src), dst(dst)
+    {}
+
+    std::shared_ptr<memory> getDst() const override { return dst; }
+  };
+
+  // Resampling node
+  class ResampleNode : public MklNode
+  {
+  private:
+    std::shared_ptr<memory> src;
+    std::shared_ptr<memory> dst;
+
+  public:
+    ResampleNode(const resampling_forward::primitive_desc& desc,
+                 const std::shared_ptr<memory>& src,
+                 const std::shared_ptr<memory>& dst)
+      : MklNode(resampling_forward(desc),
+                { { DNNL_ARG_SRC, *src },
+                  { DNNL_ARG_DST, *dst } }),
                 src(src), dst(dst)
     {}
 
@@ -131,8 +138,8 @@ namespace oidn {
     ReorderNode(const std::shared_ptr<memory>& src,
                 const std::shared_ptr<memory>& dst)
       : MklNode(reorder(reorder::primitive_desc(*src, *dst)),
-                { { MKLDNN_ARG_SRC, *src },
-                  { MKLDNN_ARG_DST, *dst } }),
+                { { DNNL_ARG_SRC, *src },
+                  { DNNL_ARG_DST, *dst } }),
                 src(src), dst(dst)
     {}
 

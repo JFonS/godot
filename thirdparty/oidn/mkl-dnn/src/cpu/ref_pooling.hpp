@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2016-2018 Intel Corporation
+* Copyright 2016-2020 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -19,32 +19,33 @@
 
 #include <assert.h>
 
-#include "c_types_map.hpp"
-#include "type_helpers.hpp"
-#include "utils.hpp"
+#include "common/c_types_map.hpp"
+#include "common/primitive.hpp"
+#include "common/type_helpers.hpp"
+#include "common/utils.hpp"
 
-#include "cpu_pooling_pd.hpp"
-#include "cpu_primitive.hpp"
+#include "cpu/platform.hpp"
 
-namespace mkldnn {
+#include "cpu/cpu_pooling_pd.hpp"
+
+namespace dnnl {
 namespace impl {
 namespace cpu {
 
 template <impl::data_type_t data_type, impl::data_type_t acc_type = data_type>
-struct ref_pooling_fwd_t: public cpu_primitive_t {
-    struct pd_t: public cpu_pooling_fwd_pd_t {
+struct ref_pooling_fwd_t : public primitive_t {
+    struct pd_t : public cpu_pooling_fwd_pd_t {
         using cpu_pooling_fwd_pd_t::cpu_pooling_fwd_pd_t;
 
         DECLARE_COMMON_PD_T("ref:any", ref_pooling_fwd_t);
 
-        status_t init() {
-            bool ok = true
-                && set_default_params() == status::success
-                && is_fwd()
-                && utils::everyone_is(data_type, src_md()->data_type,
-                        dst_md()->data_type)
-                && desc()->accum_data_type == acc_type
-                && attr()->has_default_values();
+        status_t init(engine_t *engine) {
+            bool ok = platform::has_data_type_support(data_type)
+                    && set_default_params() == status::success && is_fwd()
+                    && utils::everyone_is(
+                            data_type, src_md()->data_type, dst_md()->data_type)
+                    && desc()->accum_data_type == acc_type
+                    && attr()->has_default_values();
             if (!ok) return status::unimplemented;
 
             bool is_training = desc_.prop_kind == prop_kind::forward_training;
@@ -55,65 +56,62 @@ struct ref_pooling_fwd_t: public cpu_primitive_t {
         }
     };
 
-    ref_pooling_fwd_t(const pd_t *apd): cpu_primitive_t(apd) {}
+    ref_pooling_fwd_t(const pd_t *apd) : primitive_t(apd) {}
 
     typedef typename prec_traits<data_type>::type data_t;
     typedef typename prec_traits<acc_type>::type acc_data_t;
 
-    virtual status_t execute(const exec_ctx_t &ctx) const override {
+    status_t execute(const exec_ctx_t &ctx) const override {
         execute_forward(ctx);
         return status::success;
     }
 
 private:
     void execute_forward(const exec_ctx_t &ctx) const;
-    const pd_t *pd() const { return (const pd_t *)primitive_t::pd(); }
+    const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
 };
 
-template <impl::data_type_t data_type, impl::data_type_t acc_type = data_type>
-struct ref_pooling_bwd_t: public cpu_primitive_t {
-    struct pd_t: public cpu_pooling_bwd_pd_t {
+template <impl::data_type_t data_type>
+struct ref_pooling_bwd_t : public primitive_t {
+    struct pd_t : public cpu_pooling_bwd_pd_t {
         using cpu_pooling_bwd_pd_t::cpu_pooling_bwd_pd_t;
 
         DECLARE_COMMON_PD_T("ref:any", ref_pooling_bwd_t);
 
-        status_t init() {
-            bool ok = true
-                && set_default_params() == status::success
-                && !is_fwd()
-                && utils::everyone_is(data_type, diff_dst_md()->data_type,
-                        diff_src_md()->data_type)
-                && attr()->has_default_values();
+        status_t init(engine_t *engine) {
+            bool ok = platform::has_data_type_support(data_type)
+                    && set_default_params() == status::success && !is_fwd()
+                    && utils::everyone_is(data_type, diff_dst_md()->data_type,
+                            diff_src_md()->data_type)
+                    && attr()->has_default_values();
             if (!ok) return status::unimplemented;
 
             if (desc()->alg_kind == alg_kind::pooling_max) {
                 init_default_ws();
-                if (!compare_ws(hint_fwd_pd_))
-                    return status::unimplemented;
+                if (!compare_ws(hint_fwd_pd_)) return status::unimplemented;
             }
 
             return status::success;
         }
     };
 
-    ref_pooling_bwd_t(const pd_t *apd): cpu_primitive_t(apd) {}
+    ref_pooling_bwd_t(const pd_t *apd) : primitive_t(apd) {}
     typedef typename prec_traits<data_type>::type data_t;
-    typedef typename prec_traits<acc_type>::type acc_data_t;
 
-    virtual status_t execute(const exec_ctx_t &ctx) const override {
+    status_t execute(const exec_ctx_t &ctx) const override {
         execute_backward(ctx);
         return status::success;
     }
 
 private:
     void execute_backward(const exec_ctx_t &ctx) const;
-    const pd_t *pd() const { return (const pd_t *)primitive_t::pd(); }
+    const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
 };
 
-}
-}
-}
+} // namespace cpu
+} // namespace impl
+} // namespace dnnl
 
 #endif
 
-// vim: et ts=4 sw=4 cindent cino^=l0,\:0,N-s
+// vim: et ts=4 sw=4 cindent cino+=l0,\:4,N-s

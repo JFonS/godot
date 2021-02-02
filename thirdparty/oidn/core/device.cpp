@@ -1,21 +1,8 @@
-// ======================================================================== //
-// Copyright 2009-2019 Intel Corporation                                    //
-//                                                                          //
-// Licensed under the Apache License, Version 2.0 (the "License");          //
-// you may not use this file except in compliance with the License.         //
-// You may obtain a copy of the License at                                  //
-//                                                                          //
-//     http://www.apache.org/licenses/LICENSE-2.0                           //
-//                                                                          //
-// Unless required by applicable law or agreed to in writing, software      //
-// distributed under the License is distributed on an "AS IS" BASIS,        //
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. //
-// See the License for the specific language governing permissions and      //
-// limitations under the License.                                           //
-// ======================================================================== //
+// Copyright 2009-2020 Intel Corporation
+// SPDX-License-Identifier: Apache-2.0
 
 #include "device.h"
-#include "autoencoder.h"
+#include "unet.h"
 
 namespace oidn {
 
@@ -29,9 +16,7 @@ namespace oidn {
 
   Device::~Device()
   {
-    // -- GODOT start --
     //observer.reset();
-    // -- GODOT end --
   }
 
   void Device::setError(Device* device, Error code, const std::string& message)
@@ -143,9 +128,6 @@ namespace oidn {
     if (isCommitted())
       throw Exception(Error::InvalidOperation, "device can be committed only once");
 
-    // -- GODOT start --
-    #if 0
-    // -- GODOT end --
     // Get the optimal thread affinities
     if (setAffinity)
     {
@@ -155,17 +137,17 @@ namespace oidn {
     }
 
     // Create the task arena
-    const int maxNumThreads = affinity ? affinity->getNumThreads() : tbb::this_task_arena::max_concurrency();
-    numThreads = (numThreads > 0) ? min(numThreads, maxNumThreads) : maxNumThreads;
-    arena = std::make_shared<tbb::task_arena>(numThreads);
+    //const int maxNumThreads = affinity ? affinity->getNumThreads() : tbb::this_task_arena::max_concurrency();
+    numThreads = 1 ; //(numThreads > 0) ? min(numThreads, maxNumThreads) : maxNumThreads;
+    // arena = std::make_shared<tbb::task_arena>(numThreads);
 
     // Automatically set the thread affinities
-    if (affinity)
-      observer = std::make_shared<PinningObserver>(affinity, *arena);
-    // -- GODOT start --
-    #endif
-    numThreads = 1;
-    // -- GODOT end --
+    //if (affinity)
+    // observer = std::make_shared<PinningObserver>(affinity, *arena);
+
+    // Initialize DNNL verbosity (unfortunately this is not per-device but global)
+    dnnl_set_verbose(clamp(verbose - 2, 0, 2));
+
     dirty = false;
 
     if (isVerbose())
@@ -199,17 +181,9 @@ namespace oidn {
 
     Ref<Filter> filter;
 
-// -- GODOT start --
-// Godot doesn't need Raytracing filters. Removing them saves space in the weights files.
-#if 0
-// -- GODOT end --
-    if (type == "RT")
+    /*if (type == "RT")
       filter = makeRef<RTFilter>(Ref<Device>(this));
-// -- GODOT start --
-// Godot doesn't need Raytracing filters. Removing them saves space in the weights files.
-#endif
-    if (type == "RTLightmap")
-// -- GODOT end --
+    else*/ if (type == "RTLightmap")
       filter = makeRef<RTLightmapFilter>(Ref<Device>(this));
     else
       throw Exception(Error::InvalidArgument, "unknown filter type");
@@ -226,12 +200,23 @@ namespace oidn {
     std::cout << "  Build   : " << getBuildName() << std::endl;
     std::cout << "  Platform: " << getPlatformName() << std::endl;
 
-// -- GODOT start --
-//    std::cout << "  Tasking :";
-//    std::cout << " TBB" << TBB_VERSION_MAJOR << "." << TBB_VERSION_MINOR;
-//    std::cout << " TBB_header_interface_" << TBB_INTERFACE_VERSION << " TBB_lib_interface_" << tbb::TBB_runtime_interface_version();
-//    std::cout << std::endl;
-// -- GODOT end --
+    std::cout << "  Targets :";
+    if (mayiuse(sse41))       std::cout << " SSE4.1";
+    if (mayiuse(avx2))        std::cout << " AVX2";
+    if (mayiuse(avx512_core)) std::cout << " AVX512SKX";
+    std::cout << " (supported)" << std::endl;
+    std::cout << "            SSE4.1 AVX2 AVX512SKX (compile time enabled)" << std::endl;
+
+    std::cout << "  Tasking :";
+    //std::cout << " TBB" << TBB_VERSION_MAJOR << "." << TBB_VERSION_MINOR;
+  #if TBB_INTERFACE_VERSION >= 12002
+    //std::cout << " TBB_header_interface_" << TBB_INTERFACE_VERSION << " TBB_lib_interface_" << TBB_runtime_interface_version();
+  #else
+    //std::cout << " TBB_header_interface_" << TBB_INTERFACE_VERSION << " TBB_lib_interface_" << tbb::TBB_runtime_interface_version();
+  #endif
+
+    std::cout << std::endl;
+
     std::cout << std::endl;
   }
 

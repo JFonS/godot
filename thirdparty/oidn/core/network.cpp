@@ -1,69 +1,52 @@
-// ======================================================================== //
-// Copyright 2009-2019 Intel Corporation                                    //
-//                                                                          //
-// Licensed under the Apache License, Version 2.0 (the "License");          //
-// you may not use this file except in compliance with the License.         //
-// You may obtain a copy of the License at                                  //
-//                                                                          //
-//     http://www.apache.org/licenses/LICENSE-2.0                           //
-//                                                                          //
-// Unless required by applicable law or agreed to in writing, software      //
-// distributed under the License is distributed on an "AS IS" BASIS,        //
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. //
-// See the License for the specific language governing permissions and      //
-// limitations under the License.                                           //
-// ======================================================================== //
+// Copyright 2009-2020 Intel Corporation
+// SPDX-License-Identifier: Apache-2.0
 
 #include "upsample.h"
-#include "weights_reorder.h"
+#include "color.h"
 #include "network.h"
-// -- GODOT start -- 
-#include <cstring>
-// -- GODOT end --
 
 namespace oidn {
 
-  template<int K>
-  Network<K>::Network(const Ref<Device>& device, const std::map<std::string, Tensor>& weightMap)
+  Network::Network(const Ref<Device>& device, const std::map<std::string, Tensor>& weightsMap)
     : device(device),
-      eng(engine::cpu, 0),
+      eng(engine::kind::cpu, 0),
       sm(eng),
-      weightMap(weightMap)
+      weightsMap(weightsMap)
   {
+    if (mayiuse(avx512_core))
+    {
+      K = 16;
+      nChwKc = memory::format_tag::nChw16c;
+    }
+    else
+    {
+      K = 8;
+      nChwKc = memory::format_tag::nChw8c;
+    }
   }
 
-  template<int K>
-  void Network<K>::execute(const Progress& progress, int taskIndex)
+  void Network::execute(Progress& progress)
   {
-    if (progress.func)
-    {
-      const double value = double(taskIndex) / double(progress.taskCount);
-      if (!progress.func(progress.userPtr, value))
-        throw Exception(Error::Cancelled, "execution was cancelled");
-    }
-
     for (size_t i = 0; i < nodes.size(); ++i)
     {
       nodes[i]->execute(sm);
-
-      if (progress.func)
-      {
-        const double value = (double(taskIndex) + double(i+1) / double(nodes.size())) / double(progress.taskCount);
-        if (!progress.func(progress.userPtr, value))
-          throw Exception(Error::Cancelled, "execution was cancelled");
-      }
+      progress.update(1);
     }
   }
 
-  template<int K>
-  std::shared_ptr<memory> Network<K>::allocTensor(const memory::dims& dims,
-                                                  memory::format_tag format,
-                                                  void* data)
+  double Network::getWorkAmount() const
+  {
+    return double(nodes.size());
+  }
+
+  std::shared_ptr<memory> Network::allocMemory(const memory::dims& dims,
+                                               memory::format_tag format,
+                                               void* data)
   {
     if (format == memory::format_tag::any)
     {
       if (dims.size() == 4)
-        format = BlockedFormat<K>::nChwKc;
+        format = nChwKc;
       else if (dims.size() == 1)
         format = memory::format_tag::x;
       else
@@ -72,8 +55,8 @@ namespace oidn {
     memory::desc desc(dims, memory::data_type::f32, format);
     if (data == nullptr)
     {
-      const size_t bytes = getTensorSize(dims) * sizeof(float);
-      if (format == BlockedFormat<K>::nChwKc)
+      const size_t bytes = getMemorySize(dims) * sizeof(float);
+      if (format == nChwKc)
         activationAllocBytes += bytes;
       totalAllocBytes += bytes;
 
@@ -85,21 +68,20 @@ namespace oidn {
     }
   }
 
-  template<int K>
-  std::shared_ptr<memory> Network<K>::castTensor(const memory::dims& dims,
-                                                 const std::shared_ptr<memory>& src,
-                                                 size_t srcOffset,
-                                                 memory::format_tag format)
+  std::shared_ptr<memory> Network::castMemory(const memory::dims& dims,
+                                              const std::shared_ptr<memory>& src,
+                                              size_t srcOffset,
+                                              memory::format_tag format)
   {
-    const mkldnn_memory_desc_t& srcDesc = src->get_desc().data;
+    const dnnl_memory_desc_t& srcDesc = src->get_desc().data;
     MAYBE_UNUSED(srcDesc);
     assert(srcDesc.data_type == memory::data_type::f32);
-    assert(getTensorSize(src) >= srcOffset + getTensorSize(dims));
+    assert(getMemorySize(src) >= srcOffset + getMemorySize(dims));
 
     if (format == memory::format_tag::any)
     {
       if (dims.size() == 4)
-        format = BlockedFormat<K>::nChwKc;
+        format = nChwKc;
       else if (dims.size() == 1)
         format = memory::format_tag::x;
       else
@@ -110,38 +92,35 @@ namespace oidn {
     return std::make_shared<memory>(desc, eng, srcPtr);
   }
 
-  template<int K>
-  std::shared_ptr<memory> Network<K>::castTensor(const memory::dims& dims,
-                                                 const std::shared_ptr<memory>& src,
-                                                 const memory::dims& srcOffset)
+  std::shared_ptr<memory> Network::castMemory(const memory::dims& dims,
+                                              const std::shared_ptr<memory>& src,
+                                              const memory::dims& srcOffset)
   {
-    return castTensor(dims, src, getTensorSize(srcOffset));
+    return castMemory(dims, src, getMemorySize(srcOffset));
   }
 
-  template<int K>
-  void Network<K>::zeroTensor(const std::shared_ptr<memory>& dst)
+  void Network::zeroMemory(const std::shared_ptr<memory>& dst)
   {
-    assert(getTensorType(dst) == memory::data_type::f32);
-    memset(dst->get_data_handle(), 0, getTensorSize(dst)*sizeof(float));
+    assert(getMemoryType(dst) == memory::data_type::f32);
+    memset(dst->get_data_handle(), 0, getMemorySize(dst)*sizeof(float));
   }
 
-  template<int K>
-  memory::dims Network<K>::getInputReorderDims(const memory::dims& srcDims, int alignment)
+  memory::dims Network::getInputReorderDims(const memory::dims& srcDims, int alignment)
   {
     memory::dims dstDims = srcDims;
-    dstDims[1] = getPadded<K>(srcDims[1]); // round up C
-    dstDims[2] = roundUp(srcDims[2], memory::dim(alignment)); // round up H
-    dstDims[3] = roundUp(srcDims[3], memory::dim(alignment)); // round up W
+    dstDims[1] = round_up(srcDims[1], K); // round up C
+    dstDims[2] = round_up(srcDims[2], memory::dim(alignment)); // round up H
+    dstDims[3] = round_up(srcDims[3], memory::dim(alignment)); // round up W
     return dstDims;
   }
 
-  template<int K>
-  std::shared_ptr<Node> Network<K>::addInputReorder(const Image& color,
-                                                    const Image& albedo,
-                                                    const Image& normal,
-                                                    const std::shared_ptr<TransferFunction>& transferFunc,
-                                                    int alignment,
-                                                    const std::shared_ptr<memory>& userDst)
+  std::shared_ptr<Node> Network::addInputReorder(const Image& color,
+                                                 const Image& albedo,
+                                                 const Image& normal,
+                                                 const std::shared_ptr<TransferFunction>& transferFunc,
+                                                 bool hdr,
+                                                 int alignment,
+                                                 const std::shared_ptr<memory>& userDst)
   {
     assert(color);
     int inputC = 3;
@@ -154,148 +133,107 @@ namespace oidn {
     // Allocate padded memory
     auto dst = userDst;
     if (!dst)
-      dst = allocTensor(dstDims);
+      dst = allocMemory(dstDims);
 
     // Push node
-    std::shared_ptr<Node> node;
-
-    if (auto tf = std::dynamic_pointer_cast<LinearTransferFunction>(transferFunc))
-      node = std::make_shared<InputReorderNode<K, LinearTransferFunction>>(color, albedo, normal, dst, tf);
-    else if (auto tf = std::dynamic_pointer_cast<GammaTransferFunction>(transferFunc))
-      node = std::make_shared<InputReorderNode<K, GammaTransferFunction>>(color, albedo, normal, dst, tf);
-    else if (auto tf = std::dynamic_pointer_cast<LogTransferFunction>(transferFunc))
-      node = std::make_shared<InputReorderNode<K, LogTransferFunction>>(color, albedo, normal, dst, tf);
-    else if (auto tf = std::dynamic_pointer_cast<PQXTransferFunction>(transferFunc))
-      node = std::make_shared<InputReorderNode<K, PQXTransferFunction>>(color, albedo, normal, dst, tf);
-    else
-      assert(0);
-
+    auto node = std::make_shared<InputReorderNode>(color, albedo, normal, dst, transferFunc, hdr);
     nodes.push_back(node);
     return node;
   }
 
-  template<int K>
-  std::shared_ptr<Node> Network<K>::addOutputReorder(const std::shared_ptr<memory>& src,
-                                                     const std::shared_ptr<TransferFunction>& transferFunc,
-                                                     const Image& output)
+  std::shared_ptr<Node> Network::addOutputReorder(const std::shared_ptr<memory>& src,
+                                                  const std::shared_ptr<TransferFunction>& transferFunc,
+                                                  bool hdr,
+                                                  const Image& output)
   {
-    memory::dims srcDims = getTensorDims(src);
+    memory::dims srcDims = getMemoryDims(src);
     assert(srcDims[1] == K);
 
     // Push node
-    std::shared_ptr<Node> node;
-
-    if (auto tf = std::dynamic_pointer_cast<LinearTransferFunction>(transferFunc))
-      node = std::make_shared<OutputReorderNode<K, LinearTransferFunction>>(src, output, tf);
-    else if (auto tf = std::dynamic_pointer_cast<GammaTransferFunction>(transferFunc))
-      node = std::make_shared<OutputReorderNode<K, GammaTransferFunction>>(src, output, tf);
-    else if (auto tf = std::dynamic_pointer_cast<LogTransferFunction>(transferFunc))
-      node = std::make_shared<OutputReorderNode<K, LogTransferFunction>>(src, output, tf);
-    else if (auto tf = std::dynamic_pointer_cast<PQXTransferFunction>(transferFunc))
-      node = std::make_shared<OutputReorderNode<K, PQXTransferFunction>>(src, output, tf);
-    else
-      assert(0);
-
+    auto node = std::make_shared<OutputReorderNode>(src, output, transferFunc, hdr);
     nodes.push_back(node);
     return node;
   }
 
-  template<int K>
-  memory::dims Network<K>::getConvDims(const std::string& name, const memory::dims& srcDims)
+  memory::dims Network::getConvDims(const std::string& name, const memory::dims& srcDims)
   {
-    auto b = weightMap[name + "/b"];
+    auto b = weightsMap[name + ".bias"];
     memory::dims dstDims = srcDims;
-    dstDims[1] = getPadded<K>(b.dims[0]); // dstDims[C] = getPadded(OC)
+    dstDims[1] = round_up(b.dims[0], K); // dstDims[C] = round_up(OC, K)
     return dstDims;
   }
 
-  template<int K>
-  std::shared_ptr<Node> Network<K>::addConv(const std::string& name,
-                                            const std::shared_ptr<memory>& src,
-                                            const std::shared_ptr<memory>& userDst,
-                                            bool relu)
+  std::shared_ptr<Node> Network::addConv(const std::string& name,
+                                         const std::shared_ptr<memory>& src,
+                                         const std::shared_ptr<memory>& userDst,
+                                         bool relu)
   {
     const memory::dims strides = {1, 1};
     const memory::dims padding = {1, 1};
 
-    memory::dims srcDims = getTensorDims(src);
+    memory::dims srcDims = getMemoryDims(src);
 
-    // Get the weights
-    const auto& W = weightMap[name + "/W"];
-    if (W.ndims() != 4 || W.format != "oihw")
+    // Get and pad the weights
+    const auto& W = weightsMap[name + ".weight"];
+    if (W.ndims() != 4 || W.layout != "oihw")
       throw Exception(Error::InvalidOperation, "invalid convolution weights");
-    memory::dims weightsDims = W.dims;
-    auto userWeights = allocTensor(weightsDims, memory::format_tag::oihw, W.data);
+    auto weights = padWeights(W);
+    memory::dims weightsDims = getMemoryDims(weights);
 
-    // Pad the weights
-    memory::dims weightsPadDims = weightsDims;
-    weightsPadDims[1] = getPadded<K>(weightsDims[1]); // IC
-    weightsPadDims[0] = getPadded<K>(weightsDims[0]); // OC
-    assert(srcDims[1] == weightsPadDims[1]); // srcDims[C] == weightsPadDims[IC]
-    auto weightsPad = allocTensor(weightsPadDims, memory::format_tag::oihw);
-    WeightsReorderNode<K>(userWeights, weightsPad).execute(sm);
-
-    // Get the biases
-    const auto& b = weightMap[name + "/b"];
+    // Get and pad the biases
+    const auto& b = weightsMap[name + ".bias"];
     if (b.ndims() != 1)
       throw Exception(Error::InvalidOperation, "invalid convolution biases");
-    memory::dims biasDims = b.dims;
-
-    // Copy/pad the biases
-    memory::dims biasPadDims = {getPadded<K>(biasDims[0])};
-    auto bias = allocTensor(biasPadDims);
-    if (biasDims[0] != biasPadDims[0])
-      memset(bias->get_data_handle(), 0, biasPadDims[0]*sizeof(float));
-    memcpy(bias->get_data_handle(), b.data, biasDims[0]*sizeof(float));
+    auto bias = padBias(b);
+    memory::dims biasDims = getMemoryDims(bias);
 
     // Allocate memory for destination
     memory::dims dstDims = srcDims;
-    dstDims[1] = weightsPadDims[0]; // dstDims[C] = weightsPadDims[OC]
+    dstDims[1] = weightsDims[0]; // dstDims[C] = weightsDims[OC]
 
     std::shared_ptr<memory> dst;
     if (!userDst)
-      dst = allocTensor(dstDims);
-    else if (getTensorDims(userDst) == dstDims)
+      dst = allocMemory(dstDims);
+    else if (getMemoryDims(userDst) == dstDims)
       dst = userDst;
     else
-      dst = castTensor(dstDims, userDst);
+      dst = castMemory(dstDims, userDst);
 
     // Create a convolution
     // Let the convolution primitive choose the weights format
-    auto weightsDesc = memory::desc({ weightsPadDims }, memory::data_type::f32, memory::format_tag::any);
+    auto weightsDesc = memory::desc({ weightsDims }, memory::data_type::f32, memory::format_tag::any);
 
-    auto convAlgo = (K == 16) ? convolution_winograd : convolution_direct;
     auto convDesc = convolution_forward::desc(
-      prop_kind::forward_inference, convAlgo,
+      prop_kind::forward_inference, algorithm::convolution_direct,
       src->get_desc(),
       weightsDesc,
       bias->get_desc(),
       dst->get_desc(),
-      strides, padding, padding, padding_kind::zero);
+      strides, padding, padding);
 
     // Incorporate relu
-    mkldnn::primitive_attr convAttr;
+    dnnl::primitive_attr convAttr;
     if (relu)
     {
-      mkldnn::post_ops ops;
+      dnnl::post_ops ops;
       ops.append_eltwise(
-        1.f,   // scale factor, not used
+        1.f,   // scale
         algorithm::eltwise_relu,
-        0.f,   // max with
-        0.f    // unused
+        0.f,   // alpha
+        0.f    // beta
       );
       convAttr.set_post_ops(ops);
     }
-    convAttr.set_scratchpad_mode(scratchpad_mode_user);
+    convAttr.set_scratchpad_mode(scratchpad_mode::user);
 
     auto convPrimDesc = convolution_forward::primitive_desc(convDesc, convAttr, eng);
 
     // Reorder the weights to the final format, if necessary
-    auto weights = weightsPad;
-    if (convPrimDesc.weights_desc() != weightsPad->get_desc())
+    if (convPrimDesc.weights_desc() != weights->get_desc())
     {
+      auto oldWeights = weights;
       weights = std::make_shared<memory>(convPrimDesc.weights_desc(), eng);
-      ReorderNode(weightsPad, weights).execute(sm);
+      ReorderNode(oldWeights, weights).execute(sm);
     }
 
     // Create convolution node and add it to the net
@@ -304,8 +242,7 @@ namespace oidn {
     return node;
   }
 
-  template<int K>
-  memory::dims Network<K>::getPoolDims(const memory::dims& srcDims)
+  memory::dims Network::getPoolDims(const memory::dims& srcDims)
   {
     memory::dims dstDims = srcDims;
     dstDims[2] /= 2; // H/2
@@ -313,43 +250,40 @@ namespace oidn {
     return dstDims;
   }
 
-  template<int K>
-  std::shared_ptr<Node> Network<K>::addPool(const std::shared_ptr<memory>& src,
-                                            const std::shared_ptr<memory>& userDst)
+  std::shared_ptr<Node> Network::addPool(const std::shared_ptr<memory>& src,
+                                         const std::shared_ptr<memory>& userDst)
   {
     const memory::dims kernel  = {2, 2};
     const memory::dims strides = {2, 2};
     const memory::dims padding = {0, 0};
 
-    memory::dims srcDims = getTensorDims(src);
+    memory::dims srcDims = getMemoryDims(src);
     memory::dims dstDims = getPoolDims(srcDims);
 
     std::shared_ptr<memory> dst;
     if (!userDst)
-      dst = allocTensor(dstDims);
-    else if (getTensorDims(userDst) == dstDims)
+      dst = allocMemory(dstDims);
+    else if (getMemoryDims(userDst) == dstDims)
       dst = userDst;
     else
-      dst = castTensor(dstDims, userDst);
+      dst = castMemory(dstDims, userDst);
 
     auto poolDesc = pooling_forward::desc(
-      prop_kind::forward_inference, pooling_max,
+      prop_kind::forward_inference, algorithm::pooling_max,
       src->get_desc(),
       dst->get_desc(),
-      strides, kernel, padding, padding, padding_kind::zero);
+      strides, kernel, padding, padding);
 
-    mkldnn::primitive_attr poolAttr;
-    poolAttr.set_scratchpad_mode(scratchpad_mode_user);
+    dnnl::primitive_attr poolAttr;
+    poolAttr.set_scratchpad_mode(scratchpad_mode::user);
 
     auto poolPrimDesc = pooling_forward::primitive_desc(poolDesc, poolAttr, eng);
-
     auto node = std::make_shared<PoolNode>(poolPrimDesc, src, dst);
     nodes.push_back(node);
     return node;
   }
 
-  template<int K>
-  memory::dims Network<K>::getUpsampleDims(const memory::dims& srcDims)
+  memory::dims Network::getUpsampleDims(const memory::dims& srcDims)
   {
     memory::dims dstDims = srcDims;
     dstDims[2] *= 2; // H*2
@@ -357,29 +291,39 @@ namespace oidn {
     return dstDims;
   }
 
-  template<int K>
-  std::shared_ptr<Node> Network<K>::addUpsample(const std::shared_ptr<memory>& src,
-                                                const std::shared_ptr<memory>& userDst)
+  std::shared_ptr<Node> Network::addUpsample(const std::shared_ptr<memory>& src,
+                                             const std::shared_ptr<memory>& userDst)
   {
-    memory::dims srcDims = getTensorDims(src);
+    memory::dims srcDims = getMemoryDims(src);
     memory::dims dstDims = getUpsampleDims(srcDims);
 
     std::shared_ptr<memory> dst;
     if (!userDst)
-      dst = allocTensor(dstDims);
-    else if (getTensorDims(userDst) == dstDims)
+      dst = allocMemory(dstDims);
+    else if (getMemoryDims(userDst) == dstDims)
       dst = userDst;
     else
-      dst = castTensor(dstDims, userDst);
+      dst = castMemory(dstDims, userDst);
 
     // Create upsampling node and add it to net
-    auto node = std::make_shared<UpsampleNode<K>>(src, dst);
+    /*
+    auto resampleDesc = resampling_forward::desc(
+      prop_kind::forward_inference, algorithm::resampling_nearest,
+      src->get_desc(),
+      dst->get_desc());
+
+    dnnl::primitive_attr resampleAttr;
+    resampleAttr.set_scratchpad_mode(scratchpad_mode::user);
+
+    auto resamplePrimDesc = resampling_forward::primitive_desc(resampleDesc, resampleAttr, eng);
+    auto node = std::make_shared<ResampleNode>(resamplePrimDesc, src, dst);
+    */
+    auto node = std::make_shared<UpsampleNode>(K, src, dst);
     nodes.push_back(node);
     return node;
   }
 
-  template<int K>
-  memory::dims Network<K>::getConcatDims(const memory::dims& src1Dims, const memory::dims& src2Dims)
+  memory::dims Network::getConcatDims(const memory::dims& src1Dims, const memory::dims& src2Dims)
   {
     assert(src1Dims[0] == src2Dims[0]); // N
     assert(src1Dims[2] == src2Dims[2]); // H
@@ -390,17 +334,15 @@ namespace oidn {
     return dstDims;
   }
 
-  template<int K>
-  std::shared_ptr<Node> Network<K>::addAutoexposure(const Image& color,
-                                                    const std::shared_ptr<HDRTransferFunction>& transferFunc)
+  std::shared_ptr<Node> Network::addAutoexposure(const Image& color,
+                                                 const std::shared_ptr<TransferFunction>& transferFunc)
   {
     auto node = std::make_shared<AutoexposureNode>(color, transferFunc);
     nodes.push_back(node);
     return node;
   }
 
-  template <int K>
-  void Network<K>::finalize()
+  void Network::finalize()
   {
     // Compute the size of the scratchpad
     size_t scratchpadSize = 0;
@@ -411,7 +353,6 @@ namespace oidn {
     memory::dims scratchpadDims = { memory::dim(scratchpadSize) };
     memory::desc scratchpadDesc(scratchpadDims, memory::data_type::u8, memory::format_tag::x);
     auto scratchpad = std::make_shared<memory>(scratchpadDesc, eng);
-    activationAllocBytes += scratchpadSize;
     totalAllocBytes += scratchpadSize;
 
     // Set the scratchpad for the nodes
@@ -419,7 +360,7 @@ namespace oidn {
       node->setScratchpad(scratchpad);
 
     // Free the weights
-    weightMap.clear();
+    weightsMap.clear();
 
     // Print statistics
     if (device->isVerbose(2))
@@ -430,7 +371,69 @@ namespace oidn {
     }
   }
 
-  template class Network<8>;
-  template class Network<16>;
+  std::shared_ptr<memory> Network::padWeights(const Tensor& src)
+  {
+    assert(src.layout == "oihw");
+
+    const int64_t O1 = src.dims[0];
+    const int64_t I1 = src.dims[1];
+    const int64_t O2 = round_up(O1, K);
+    const int64_t I2 = round_up(I1, K);
+    const int64_t H = src.dims[2];
+    const int64_t W = src.dims[3];
+
+    Tensor::Dims dstDims = {O2, I2, H, W};
+    if (dstDims == src.dims)
+      return allocMemory(src.dims, memory::format_tag::oihw, src.data);
+
+    std::shared_ptr<memory> dstMem = allocMemory(dstDims, memory::format_tag::oihw);
+    Tensor dst(dstDims, src.layout, (float*)dstMem->map_data());
+
+    for (int64_t o = 0; o < O2; ++o)
+    {
+      for (int64_t i = 0; i < I2; ++i)
+      {
+        for (int64_t h = 0; h < H; ++h)
+        {
+          for (int64_t w = 0; w < W; ++w)
+          {
+            float value;
+            if (o < O1 && i < I1)
+              value = src(o, i, h, w);
+            else
+              value = 0; // padding;
+
+            dst(o, i, h, w) = value;
+          }
+        }
+      }
+    }
+
+    dstMem->unmap_data(dst.data);
+    return dstMem;
+  }
+
+  std::shared_ptr<memory> Network::padBias(const Tensor& src)
+  {
+    assert(src.ndims() == 1);
+
+    const int64_t X1 = src.dims[0];
+    const int64_t X2 = round_up(X1, K);
+
+    if (X2 == X1)
+      return allocMemory(src.dims, memory::format_tag::x, src.data);
+
+    std::shared_ptr<memory> dstMem = allocMemory({X2}, memory::format_tag::x);
+    Tensor dst({X2}, src.layout, (float*)dstMem->map_data());
+
+    for (int64_t x = 0; x < X1; ++x)
+      dst(x) = src(x);
+
+    for (int64_t x = X1; x < X2; ++x)
+      dst(x) = 0; // padding
+
+    dstMem->unmap_data(dst.data);
+    return dstMem;
+  }
 
 } // namespace oidn

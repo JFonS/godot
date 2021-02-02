@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2016-2018 Intel Corporation
+* Copyright 2016-2020 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -14,13 +14,15 @@
 * limitations under the License.
 *******************************************************************************/
 
-#ifndef ENGINE_HPP
-#define ENGINE_HPP
+#ifndef COMMON_ENGINE_HPP
+#define COMMON_ENGINE_HPP
 
-#include "mkldnn.h"
+#include "dnnl.h"
 
 #include "c_types_map.hpp"
-#include "primitive.hpp"
+#include "memory.hpp"
+#include "memory_storage.hpp"
+#include "primitive_desc.hpp"
 #include "utils.hpp"
 
 /** \brief An abstraction of an execution unit with shared resources
@@ -29,91 +31,127 @@
  *   - Provide engine specific memory allocation
  *   - Provide engine specific primitive_desc_t creators
  */
-struct mkldnn_engine: public mkldnn::impl::c_compatible {
-    mkldnn_engine(mkldnn::impl::engine_kind_t kind)
-        : kind_(kind)
-    {}
-    virtual ~mkldnn_engine() {}
+struct dnnl_engine : public dnnl::impl::c_compatible {
+    dnnl_engine(dnnl::impl::engine_kind_t kind,
+            dnnl::impl::runtime_kind_t runtime_kind)
+        : kind_(kind), runtime_kind_(runtime_kind) {}
+    virtual ~dnnl_engine() = default;
 
     /** get kind of the current engine */
-    virtual mkldnn::impl::engine_kind_t kind() const { return kind_; }
+    dnnl::impl::engine_kind_t kind() const { return kind_; }
 
-    /** allocate memory */
-    virtual mkldnn::impl::status_t memory_create(
-            mkldnn::impl::memory_t **memory,
-            const mkldnn::impl::memory_desc_t *md,
-            void *handle) = 0;
+    /** get the runtime kind of the current engine */
+    dnnl::impl::runtime_kind_t runtime_kind() const { return runtime_kind_; }
 
+    virtual intptr_t device_id() const { return 0; }
+
+    /** create memory storage */
+    virtual dnnl::impl::status_t create_memory_storage(
+            dnnl::impl::memory_storage_t **storage, unsigned flags, size_t size,
+            void *handle)
+            = 0;
+    dnnl::impl::status_t create_memory_storage(
+            dnnl::impl::memory_storage_t **storage, size_t size) {
+        return create_memory_storage(
+                storage, dnnl::impl::memory_flags_t::alloc, size, nullptr);
+    }
+
+    /** create stream */
+    virtual dnnl::impl::status_t create_stream(dnnl::impl::stream_t **stream,
+            unsigned flags, const dnnl::impl::stream_attr_t *attr)
+            = 0;
+
+    virtual dnnl::impl::stream_t *service_stream() const { return nullptr; }
     /** implementation section (typedefs) */
 
     // TODO: remove engine?
-    typedef mkldnn::impl::status_t (*reorder_primitive_desc_create_f)(
-            mkldnn::impl::reorder_pd_t **reorder_pd,
-            mkldnn::impl::engine_t *engine,
-            const mkldnn::impl::primitive_attr_t *attr,
-            mkldnn::impl::engine_t *src_engine,
-            const mkldnn::impl::memory_desc_t *src_md,
-            mkldnn::impl::engine_t *dst_engine,
-            const mkldnn::impl::memory_desc_t *dst_md);
+    typedef dnnl::impl::status_t (*reorder_primitive_desc_create_f)(
+            dnnl::impl::reorder_pd_t **, dnnl::impl::engine_t *engine,
+            const dnnl::impl::primitive_attr_t *attr,
+            dnnl::impl::engine_t *src_engine,
+            const dnnl::impl::memory_desc_t *src_md,
+            dnnl::impl::engine_t *dst_engine,
+            const dnnl::impl::memory_desc_t *dst_md);
 
-    typedef mkldnn::impl::status_t (*concat_primitive_desc_create_f)(
-            mkldnn::impl::concat_pd_t **concat_pd,
-            mkldnn::impl::engine_t *engine,
-            const mkldnn::impl::primitive_attr_t *attr,
-            const mkldnn::impl::memory_desc_t *dst_md,
-            int n, int concat_dim,
-            const mkldnn::impl::memory_desc_t *src_mds);
+    typedef dnnl::impl::status_t (*concat_primitive_desc_create_f)(
+            dnnl::impl::concat_pd_t **, dnnl::impl::engine_t *engine,
+            const dnnl::impl::primitive_attr_t *attr,
+            const dnnl::impl::memory_desc_t *dst_md, int n, int concat_dim,
+            const dnnl::impl::memory_desc_t *src_mds);
 
-    typedef mkldnn::impl::status_t (*sum_primitive_desc_create_f)(
-            mkldnn::impl::sum_pd_t **sum_pd,
-            mkldnn::impl::engine_t *engine,
-            const mkldnn::impl::primitive_attr_t *attr,
-            const mkldnn::impl::memory_desc_t *dst_md,
-            int n, const float *scales,
-            const mkldnn::impl::memory_desc_t *src_mds);
+    typedef dnnl::impl::status_t (*sum_primitive_desc_create_f)(
+            dnnl::impl::sum_pd_t **, dnnl::impl::engine_t *engine,
+            const dnnl::impl::primitive_attr_t *attr,
+            const dnnl::impl::memory_desc_t *dst_md, int n, const float *scales,
+            const dnnl::impl::memory_desc_t *src_mds);
 
-    typedef mkldnn::impl::status_t (*primitive_desc_create_f)(
-            mkldnn::impl::primitive_desc_t **, const mkldnn::impl::op_desc_t *,
-            const mkldnn::impl::primitive_attr_t *attr,
-            mkldnn::impl::engine_t *, const mkldnn::impl::primitive_desc_t *);
+    typedef dnnl::impl::status_t (*primitive_desc_create_f)(
+            dnnl::impl::primitive_desc_t **, const dnnl::impl::op_desc_t *,
+            const dnnl::impl::primitive_attr_t *attr, dnnl::impl::engine_t *,
+            const dnnl::impl::primitive_desc_t *);
 
     /* implementation section */
 
     /** return the list of reorder implementations. engine guarantees to return
      * a NULL-terminated list */
-    virtual const reorder_primitive_desc_create_f*
-        get_reorder_implementation_list() const = 0;
+    virtual const reorder_primitive_desc_create_f *
+    get_reorder_implementation_list(const dnnl::impl::memory_desc_t *src_md,
+            const dnnl::impl::memory_desc_t *dst_md) const = 0;
 
     /** return the list of concat implementations. engine guarantees to return
      * a NULL-terminated list */
-    virtual const concat_primitive_desc_create_f*
-        get_concat_implementation_list() const = 0;
+    virtual const concat_primitive_desc_create_f *
+    get_concat_implementation_list() const = 0;
 
     /** return the list of sum implementations. engine guarantees to return
      * a NULL-terminated list */
-    virtual const sum_primitive_desc_create_f*
-        get_sum_implementation_list() const = 0;
+    virtual const sum_primitive_desc_create_f *
+    get_sum_implementation_list() const = 0;
 
-    /** return the list of implementations. engine guarantees to return a
-     * NULL-terminated list */
-    virtual const primitive_desc_create_f* get_implementation_list() const = 0;
+    /** return the list of implementations for a given descriptor.
+     * engine guarantees to return a NULL-terminated list */
+    virtual const primitive_desc_create_f *get_implementation_list(
+            const dnnl::impl::op_desc_t *desc) const = 0;
 
 protected:
-    mkldnn::impl::engine_kind_t kind_;
+    dnnl::impl::engine_kind_t kind_;
+    dnnl::impl::runtime_kind_t runtime_kind_;
 };
 
-namespace mkldnn {
+namespace dnnl {
 namespace impl {
 
-struct engine_factory_t: public c_compatible {
+inline runtime_kind_t get_default_runtime(engine_kind_t kind) {
+#if DNNL_GPU_RUNTIME == DNNL_RUNTIME_OCL
+    if (kind == engine_kind::gpu) return runtime_kind::ocl;
+#endif
+#if DNNL_CPU_RUNTIME == DNNL_RUNTIME_SEQ
+    return runtime_kind::seq;
+#elif DNNL_CPU_RUNTIME == DNNL_RUNTIME_OMP
+    return runtime_kind::omp;
+#elif DNNL_CPU_RUNTIME == DNNL_RUNTIME_TBB
+    return runtime_kind::tbb;
+#elif DNNL_CPU_RUNTIME == DNNL_RUNTIME_THREADPOOL
+    return runtime_kind::threadpool;
+#else
+    return runtime_kind::none;
+#endif
+}
+
+inline bool is_native_runtime(runtime_kind_t kind) {
+    return utils::one_of(kind, runtime_kind::seq, runtime_kind::omp,
+            runtime_kind::tbb, runtime_kind::threadpool);
+}
+
+struct engine_factory_t : public c_compatible {
     virtual size_t count() const = 0;
-    virtual engine_kind_t kind() const = 0;
     virtual status_t engine_create(engine_t **engine, size_t index) const = 0;
+    virtual ~engine_factory_t() = default;
 };
 
-}
-}
+} // namespace impl
+} // namespace dnnl
 
 #endif
 
-// vim: et ts=4 sw=4 cindent cino^=l0,\:0,N-s
+// vim: et ts=4 sw=4 cindent cino+=l0,\:4,N-s

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2018 Intel Corporation
+* Copyright 2018-2020 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -14,25 +14,26 @@
 * limitations under the License.
 *******************************************************************************/
 
-#ifndef REF_GEMM_S8X8S32_HPP
-#define REF_GEMM_S8X8S32_HPP
+#ifndef CPU_GEMM_S8X8S32_REF_GEMM_S8X8S32_HPP
+#define CPU_GEMM_S8X8S32_REF_GEMM_S8X8S32_HPP
 
-#include <stdint.h>
+#include <cstdint>
 
-#include "mkldnn_types.h"
+#include "dnnl_types.h"
 
-namespace mkldnn {
+#include "common/c_types_map.hpp"
+
+namespace dnnl {
 namespace impl {
 namespace cpu {
 
 template <typename b_dt>
-mkldnn_status_t ref_gemm_s8x8s32(const char *transa, const char *transb,
-        const char *offsetc, const int *M, const int *N, const int *K,
-        const float *alpha, const int8_t *A, const int *LDA, const int8_t *ao,
-        const b_dt *B, const int *LDB, const int8_t *bo, const float *beta,
-        int32_t *C, const int *LDC, const int32_t *co);
-
+dnnl_status_t ref_gemm_s8x8s32(const char *transa, const char *transb,
+        const char *offsetc, const dim_t *M, const dim_t *N, const dim_t *K,
+        const float *alpha, const int8_t *A, const dim_t *LDA, const int8_t *ao,
+        const b_dt *B, const dim_t *LDB, const b_dt *bo, const float *beta,
+        int32_t *C, const dim_t *LDC, const int32_t *co);
 }
-}
-}
-#endif
+} // namespace impl
+} // namespace dnnl
+#endif // CPU_GEMM_S8X8S32_REF_GEMM_S8X8S32_HPP

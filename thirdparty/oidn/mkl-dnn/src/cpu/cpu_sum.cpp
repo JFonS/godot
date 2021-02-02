@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2017-2018 Intel Corporation
+* Copyright 2017-2020 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -14,35 +14,48 @@
 * limitations under the License.
 *******************************************************************************/
 
-#include "cpu_engine.hpp"
+#include "cpu/cpu_engine.hpp"
 
 /*
 #include "cpu/ref_sum.hpp"
 #include "cpu/simple_sum.hpp"
+
+#if DNNL_X64
+#include "cpu/x64/jit_avx512_core_bf16_sum.hpp"
+using namespace dnnl::impl::cpu::x64;
+#endif
 */
 
-namespace mkldnn {
+namespace dnnl {
 namespace impl {
 namespace cpu {
 
-using spd_create_f = mkldnn::impl::engine_t::sum_primitive_desc_create_f;
+using spd_create_f = dnnl::impl::engine_t::sum_primitive_desc_create_f;
 
 namespace {
-#define INSTANCE(...) __VA_ARGS__::pd_t::create
+// clang-format off
+#define INSTANCE(...) __VA_ARGS__::pd_t::create,
+#define INSTANCE_X64(...) DNNL_X64_ONLY(INSTANCE(__VA_ARGS__))
 static const spd_create_f cpu_sum_impl_list[] = {
-    /*
-    INSTANCE(simple_sum_t<data_type::f32>),
-    INSTANCE(ref_sum_t),
-    */
-    nullptr,
+        /*
+        INSTANCE_X64(jit_bf16_sum_t<data_type::bf16, data_type::bf16>)
+        INSTANCE_X64(jit_bf16_sum_t<data_type::bf16, data_type::f32>)
+        INSTANCE(simple_sum_t<data_type::bf16>)
+        INSTANCE(simple_sum_t<data_type::bf16, data_type::f32>)
+        INSTANCE(simple_sum_t<data_type::f32>)
+        INSTANCE(ref_sum_t)
+        */
+        nullptr,
 };
+#undef INSTANCE_X64
 #undef INSTANCE
-}
+// clang-format on
+} // namespace
 
 const spd_create_f *cpu_engine_t::get_sum_implementation_list() const {
     return cpu_sum_impl_list;
 }
 
-}
-}
-}
+} // namespace cpu
+} // namespace impl
+} // namespace dnnl

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2016-2018 Intel Corporation
+* Copyright 2016-2020 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -19,30 +19,28 @@
 
 #include <assert.h>
 
-#include "c_types_map.hpp"
-#include "memory_tracking.hpp"
-#include "type_helpers.hpp"
-#include "utils.hpp"
+#include "common/c_types_map.hpp"
+#include "common/memory_tracking.hpp"
+#include "common/primitive.hpp"
+#include "common/type_helpers.hpp"
+#include "common/utils.hpp"
 
-#include "cpu_softmax_pd.hpp"
-#include "cpu_primitive.hpp"
+#include "cpu/cpu_softmax_pd.hpp"
 
-namespace mkldnn {
+namespace dnnl {
 namespace impl {
 namespace cpu {
 
 template <impl::data_type_t data_type>
-struct ref_softmax_fwd_t: public cpu_primitive_t {
-    struct pd_t: public cpu_softmax_fwd_pd_t {
+struct ref_softmax_fwd_t : public primitive_t {
+    struct pd_t : public cpu_softmax_fwd_pd_t {
         using cpu_softmax_fwd_pd_t::cpu_softmax_fwd_pd_t;
 
         DECLARE_COMMON_PD_T("ref:any", ref_softmax_fwd_t);
 
-        status_t init() {
-            bool ok = true
-                && is_fwd()
-                && src_md()->data_type == data_type
-                && attr()->has_default_values();
+        status_t init(engine_t *engine) {
+            bool ok = true && is_fwd() && src_md()->data_type == data_type
+                    && attr()->has_default_values();
             if (!ok) return status::unimplemented;
 
             init_scratchpad();
@@ -52,43 +50,40 @@ struct ref_softmax_fwd_t: public cpu_primitive_t {
 
     private:
         void init_scratchpad() {
-            const int inner_size = utils::array_product(
-                    desc()->data_desc.dims + desc()->softmax_axis + 1,
-                    desc()->data_desc.ndims - desc()->softmax_axis - 1);
+            const dim_t in_s = inner_size();
+            const dim_t ou_s = outer_size();
 
-            if (inner_size > 1) {
+            if (in_s > 1) {
                 auto scratchpad = scratchpad_registry().registrar();
-                scratchpad.book(memory_tracking::names::key_softmax_reduction,
-                        sizeof(data_t) * 2 * inner_size);
+                scratchpad.template book<float>(
+                        memory_tracking::names::key_softmax_reduction,
+                        2 * in_s * ou_s);
             }
         }
     };
 
-    ref_softmax_fwd_t(const pd_t *apd): cpu_primitive_t(apd)
-    {
-        auto ndims = pd()->desc()->data_desc.ndims;
-        auto dims = pd()->desc()->data_desc.dims;
-        auto axis = pd()->desc()->softmax_axis;
-
-        outer_size_ = utils::array_product(dims, axis);
-        channels_ = dims[axis];
-        inner_size_ = utils::array_product(dims + axis + 1, ndims - axis - 1);
+    ref_softmax_fwd_t(const pd_t *apd) : primitive_t(apd) {
+        outer_size_ = pd()->outer_size();
+        channels_ = pd()->axis_size();
+        inner_size_ = pd()->inner_size();
 
         const memory_desc_wrapper data_d(pd()->src_md());
+        const auto &bd = data_d.blocking_desc();
 
-        bool no_axis_blocking = true;
-        for (int iblk = 0; iblk < data_d.blocking_desc().inner_nblks; ++iblk)
-            if (data_d.blocking_desc().inner_idxs[iblk] == axis)
-                no_axis_blocking = false;
+        auto axis = pd()->axis();
+        dim_t axis_blk_size = 1;
+        for (int iblk = 0; iblk < bd.inner_nblks; ++iblk)
+            if (bd.inner_idxs[iblk] == axis)
+                axis_blk_size *= bd.inner_blks[iblk];
 
-        use_dense_ = inner_size_ == 1 && data_d.is_dense()
-            && no_axis_blocking
-            && data_d.blocking_desc().strides[axis] == 1;
+        use_dense_ = true && inner_size_ == 1 && data_d.is_dense(true)
+                && data_d.only_padded_dim(axis)
+                && bd.strides[axis] == axis_blk_size;
     }
 
     typedef typename prec_traits<data_type>::type data_t;
 
-    virtual status_t execute(const exec_ctx_t &ctx) const override {
+    status_t execute(const exec_ctx_t &ctx) const override {
         if (use_dense_)
             execute_forward_dense(ctx);
         else
@@ -100,66 +95,53 @@ private:
     void execute_forward_dense(const exec_ctx_t &ctx) const;
     void execute_forward_generic(const exec_ctx_t &ctx) const;
 
-    void _max(int n, const data_t *x, data_t *max_data) const;
-    void _sub(int n, data_t alpha, const data_t *x, data_t *y) const;
-    void _exp(int n, const data_t *a, data_t *r) const;
-    void _sum(int n, const data_t *x, data_t *sum_data) const;
-    void _scal(int n, data_t alpha, data_t *x) const;
-
-    const pd_t *pd() const { return (const pd_t *)primitive_t::pd(); }
+    const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
 
     bool use_dense_;
     int outer_size_, channels_, inner_size_;
 };
 
 template <impl::data_type_t data_type>
-struct ref_softmax_bwd_t: public cpu_primitive_t {
-    struct pd_t: public cpu_softmax_bwd_pd_t {
+struct ref_softmax_bwd_t : public primitive_t {
+    struct pd_t : public cpu_softmax_bwd_pd_t {
         using cpu_softmax_bwd_pd_t::cpu_softmax_bwd_pd_t;
 
         DECLARE_COMMON_PD_T("ref:any", ref_softmax_bwd_t);
 
-        status_t init() {
-            bool ok = true
-                && !is_fwd()
-                && utils::everyone_is(data_type,
-                        dst_md()->data_type,
-                        diff_src_md()->data_type)
-                && attr()->has_default_values();
+        status_t init(engine_t *engine) {
+            bool ok = true && !is_fwd()
+                    && utils::everyone_is(data_type, dst_md()->data_type,
+                            diff_src_md()->data_type)
+                    && set_default_formats_common()
+                    && attr()->has_default_values();
             if (!ok) return status::unimplemented;
 
             return status::success;
         }
     };
 
-    ref_softmax_bwd_t(const pd_t *apd): cpu_primitive_t(apd) {
-        auto dims = pd()->desc()->diff_desc.dims;
-        auto axis = pd()->desc()->softmax_axis;
-        auto ndims = pd()->desc()->diff_desc.ndims;
-
-        outer_size_ = utils::array_product(dims, axis);
-        channels_ = dims[axis];
-        inner_size_ = utils::array_product(dims + axis + 1, ndims - axis - 1);
+    ref_softmax_bwd_t(const pd_t *apd) : primitive_t(apd) {
+        outer_size_ = pd()->outer_size();
+        channels_ = pd()->axis_size();
+        inner_size_ = pd()->inner_size();
 
         const memory_desc_wrapper data_d(pd()->dst_md());
         const memory_desc_wrapper diff_d(pd()->diff_dst_md());
+        const auto &bd = diff_d.blocking_desc();
 
-        bool no_axis_blocking = true;
-        for (int iblk = 0; iblk < diff_d.blocking_desc().inner_nblks; ++iblk)
-            if (diff_d.blocking_desc().inner_idxs[iblk] == axis)
-                no_axis_blocking = false;
+        auto axis = pd()->axis();
+        dim_t axis_blk_size = 1;
+        for (int iblk = 0; iblk < bd.inner_nblks; ++iblk)
+            if (bd.inner_idxs[iblk] == axis)
+                axis_blk_size *= bd.inner_blks[iblk];
 
-        use_dense_ = true
-            && inner_size_ == 1
-            && diff_d == data_d
-            && diff_d.is_dense()
-            && no_axis_blocking
-            && diff_d.blocking_desc().strides[axis] == 1;
+        use_dense_ = true && inner_size_ == 1 && diff_d == data_d
+                && diff_d.is_dense() && bd.strides[axis] == axis_blk_size;
     }
 
     typedef typename prec_traits<data_type>::type data_t;
 
-    virtual status_t execute(const exec_ctx_t &ctx) const override {
+    status_t execute(const exec_ctx_t &ctx) const override {
         if (use_dense_)
             execute_backward_dense(ctx);
         else
@@ -170,17 +152,16 @@ struct ref_softmax_bwd_t: public cpu_primitive_t {
 private:
     void execute_backward_dense(const exec_ctx_t &ctx) const;
     void execute_backward_generic(const exec_ctx_t &ctx) const;
-    const pd_t *pd() const { return (const pd_t *)primitive_t::pd(); }
+    const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
 
     bool use_dense_;
     int outer_size_, channels_, inner_size_;
 };
 
-
-}
-}
-}
+} // namespace cpu
+} // namespace impl
+} // namespace dnnl
 
 #endif
 
-// vim: et ts=4 sw=4 cindent cino^=l0,\:0,N-s
+// vim: et ts=4 sw=4 cindent cino+=l0,\:4,N-s

@@ -1,18 +1,5 @@
-// ======================================================================== //
-// Copyright 2009-2019 Intel Corporation                                    //
-//                                                                          //
-// Licensed under the Apache License, Version 2.0 (the "License");          //
-// you may not use this file except in compliance with the License.         //
-// You may obtain a copy of the License at                                  //
-//                                                                          //
-//     http://www.apache.org/licenses/LICENSE-2.0                           //
-//                                                                          //
-// Unless required by applicable law or agreed to in writing, software      //
-// distributed under the License is distributed on an "AS IS" BASIS,        //
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. //
-// See the License for the specific language governing permissions and      //
-// limitations under the License.                                           //
-// ======================================================================== //
+// Copyright 2009-2020 Intel Corporation
+// SPDX-License-Identifier: Apache-2.0
 
 #pragma once
 
@@ -20,23 +7,13 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "version.h"
+#include "config.h"
 
-#if defined(__cplusplus)
-extern "C" {
-#endif
+OIDN_API_NAMESPACE_BEGIN
 
-#ifndef OIDN_API
-#if defined(_WIN32) && !defined(OIDN_STATIC_LIB)
-#  define OIDN_API __declspec(dllimport)
-#else
-#  define OIDN_API
-#endif
-#endif
-
-// ----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Device
-// ----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 // Device types
 typedef enum
@@ -98,9 +75,9 @@ OIDN_API OIDNError oidnGetDeviceError(OIDNDevice device, const char** outMessage
 // Must be called before first using the device (e.g. creating filters).
 OIDN_API void oidnCommitDevice(OIDNDevice device);
 
-// ----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Buffer
-// ----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 // Formats for images and other data stored in buffers
 typedef enum
@@ -146,9 +123,9 @@ OIDN_API void oidnRetainBuffer(OIDNBuffer buffer);
 // Releases the buffer (decrements the reference count).
 OIDN_API void oidnReleaseBuffer(OIDNBuffer buffer);
 
-// ----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Filter
-// ----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 // Progress monitor callback function
 typedef bool (*OIDNProgressMonitorFunction)(void* userPtr, double n);
@@ -181,6 +158,10 @@ OIDN_API void oidnSetSharedFilterImage(OIDNFilter filter, const char* name,
                                        size_t byteOffset,
                                        size_t bytePixelStride, size_t byteRowStride);
 
+// Sets an opaque data parameter of the filter (owned by the user).
+OIDN_API void oidnSetSharedFilterData(OIDNFilter filter, const char* name,
+                                      void* ptr, size_t byteSize);
+
 // Sets a boolean parameter of the filter.
 OIDN_API void oidnSetFilter1b(OIDNFilter filter, const char* name, bool value);
 
@@ -209,6 +190,4 @@ OIDN_API void oidnCommitFilter(OIDNFilter filter);
 // Executes the filter.
 OIDN_API void oidnExecuteFilter(OIDNFilter filter);
 
-#if defined(__cplusplus)
-}
-#endif
+OIDN_API_NAMESPACE_END

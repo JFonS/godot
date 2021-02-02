@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2018 Intel Corporation
+* Copyright 2018-2020 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -14,50 +14,59 @@
 * limitations under the License.
 *******************************************************************************/
 
-#ifndef MEMORY_HPP
-#define MEMORY_HPP
+#ifndef COMMON_MEMORY_HPP
+#define COMMON_MEMORY_HPP
 
 #include <assert.h>
+#include <memory>
 
-#include "mkldnn.h"
+#include "dnnl.h"
 
 #include "c_types_map.hpp"
+#include "memory_desc_wrapper.hpp"
+#include "memory_storage.hpp"
 #include "nstl.hpp"
+#include "utils.hpp"
 
-struct mkldnn_memory: public mkldnn::impl::c_compatible {
-    mkldnn_memory(mkldnn::impl::engine_t *engine,
-            const mkldnn::impl::memory_desc_t *md)
-        : engine_(engine), md_(*md) {}
-    virtual ~mkldnn_memory() {}
+namespace dnnl {
+namespace impl {
+enum memory_flags_t { alloc = 0x1, use_runtime_ptr = 0x2, omit_zero_pad = 0x4 };
+} // namespace impl
+} // namespace dnnl
 
-    /** allocates/initializes memory */
-    virtual mkldnn::impl::status_t init() = 0;
+struct dnnl_memory : public dnnl::impl::c_compatible {
+    dnnl_memory(dnnl::impl::engine_t *engine,
+            const dnnl::impl::memory_desc_t *md, unsigned flags, void *handle);
+    virtual ~dnnl_memory() {}
 
     /** returns memory's engine */
-    mkldnn::impl::engine_t *engine() const { return engine_; }
+    dnnl::impl::engine_t *engine() const { return engine_; }
     /** returns memory's description */
-    const mkldnn::impl::memory_desc_t *md() const { return &md_; }
-
+    const dnnl::impl::memory_desc_t *md() const { return &md_; }
+    /** returns the underlying memory storage */
+    dnnl::impl::memory_storage_t *memory_storage() const {
+        return memory_storage_.get();
+    }
     /** returns data handle */
-    virtual mkldnn::impl::status_t get_data_handle(void **handle) const = 0;
+    dnnl::impl::status_t get_data_handle(void **handle) const {
+        return memory_storage()->get_data_handle(handle);
+    }
 
     /** sets data handle */
-    virtual mkldnn::impl::status_t set_data_handle(void *handle) = 0;
+    dnnl::impl::status_t set_data_handle(void *handle, dnnl_stream *stream);
 
     /** zeros padding */
-    virtual mkldnn::impl::status_t zero_pad() const
-    { return mkldnn::impl::status::success; }
+    dnnl::impl::status_t zero_pad(dnnl_stream *stream) const;
 
 protected:
-    mkldnn::impl::engine_t *engine_;
-    const mkldnn::impl::memory_desc_t md_;
+    dnnl::impl::engine_t *engine_;
+    const dnnl::impl::memory_desc_t md_;
 
 private:
-    mkldnn_memory() = delete;
-    mkldnn_memory(const mkldnn_memory &) = delete;
-    mkldnn_memory(mkldnn_memory &&) = delete;
-    mkldnn_memory &operator=(const mkldnn_memory &) = delete;
-    mkldnn_memory &operator=(mkldnn_memory &&) = delete;
+    dnnl_memory() = delete;
+    DNNL_DISALLOW_COPY_AND_ASSIGN(dnnl_memory);
+
+    std::unique_ptr<dnnl::impl::memory_storage_t> memory_storage_;
 };
 
 #endif

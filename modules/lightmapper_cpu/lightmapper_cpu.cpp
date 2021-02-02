@@ -854,8 +854,8 @@ void LightmapperCPU::_compute_indirect_light(uint32_t p_idx, void *r_lightmap) {
 			unsigned int hit_mesh_id = ray.geomID;
 			const Vector2i &size = mesh_instances[hit_mesh_id].size;
 
-			int x = ray.u * size.x;
-			int y = ray.v * size.y;
+			int x = CLAMP(ray.u * size.x, 0, size.x - 1);
+			int y = CLAMP(ray.v * size.y, 0, size.y - 1);
 
 			const int idx = scene_lightmap_indices[hit_mesh_id][y * size.x + x];
 

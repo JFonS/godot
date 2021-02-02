@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2018 Intel Corporation
+* Copyright 2018-2020 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -14,17 +14,20 @@
 * limitations under the License.
 *******************************************************************************/
 
-#ifndef CPU_RNN_PD_HPP
-#define CPU_RNN_PD_HPP
+#ifndef CPU_RNN_CPU_RNN_PD_HPP
+#define CPU_RNN_CPU_RNN_PD_HPP
 
-#include "c_types_map.hpp"
-#include "nstl.hpp"
-#include "rnn_pd.hpp"
-#include "type_helpers.hpp"
-#include "utils.hpp"
-#include "rnn_utils.hpp"
+#include "common/c_types_map.hpp"
+#include "common/nstl.hpp"
+#include "common/rnn_pd.hpp"
+#include "common/type_helpers.hpp"
+#include "common/utils.hpp"
 
-namespace mkldnn {
+#include "cpu/cpu_engine.hpp"
+
+#include "cpu/rnn/rnn_utils.hpp"
+
+namespace dnnl {
 namespace impl {
 namespace cpu {
 
@@ -41,11 +44,21 @@ protected:
 
         // Optional parameters
         if (with_src_iter() && src_iter_md_.format_kind == format_kind::any)
-            CHECK(memory_desc_init_by_tag(src_iter_md_, ldsnc));
+            CHECK(memory_desc_init_by_tag(src_iter_md_, ldnc));
+        if (with_src_iter_c() && src_iter_c_md_.format_kind == format_kind::any)
+            CHECK(memory_desc_init_by_tag(src_iter_c_md_, ldnc));
+        if (is_lstm_peephole()
+                && weights_peephole_md_.format_kind == format_kind::any)
+            CHECK(memory_desc_init_by_tag(weights_peephole_md_, ldgo));
+        if (is_lstm_projection()
+                && weights_projection_md_.format_kind == format_kind::any)
+            CHECK(memory_desc_init_by_tag(weights_projection_md_, ldio));
         if (with_bias() && bias_md_.format_kind == format_kind::any)
             CHECK(memory_desc_init_by_tag(bias_md_, ldgo));
         if (with_dst_iter() && dst_iter_md_.format_kind == format_kind::any)
-            CHECK(memory_desc_init_by_tag(dst_iter_md_, ldsnc));
+            CHECK(memory_desc_init_by_tag(dst_iter_md_, ldnc));
+        if (with_dst_iter_c() && dst_iter_c_md_.format_kind == format_kind::any)
+            CHECK(memory_desc_init_by_tag(dst_iter_c_md_, ldnc));
 
         return status::success;
     }
@@ -55,42 +68,63 @@ protected:
         using namespace data_type;
         using namespace types;
 
-        auto is_blocked = [&](memory_desc_t md, int ndims) {
-            return md.format_kind == format_kind::blocked && md.ndims == ndims;
+        auto is_blocked = [&](const memory_desc_t &md, int ndims,
+                                  bool require_last_dim_contiguous) {
+            return md.format_kind == format_kind::blocked && md.ndims == ndims
+                    && IMPLICATION(require_last_dim_contiguous,
+                            md.format_desc.blocking.strides[md.ndims - 1] == 1);
         };
 
         bool ok = true;
-        ok = ok && is_blocked(src_layer_md_, 3)
-                && is_blocked(dst_layer_md_, 3);
-        ok = ok && IMPLICATION(!is_zero_md(&src_iter_md_),
-                           is_blocked(src_iter_md_, 5))
+        ok = ok && is_blocked(src_layer_md_, 3, true)
+                && is_blocked(dst_layer_md_, 3, true);
+        ok = ok
+                && IMPLICATION(!is_zero_md(&src_iter_md_),
+                        is_blocked(src_iter_md_, 4, true))
+                && IMPLICATION(!is_zero_md(&src_iter_c_md_),
+                        is_blocked(src_iter_c_md_, 4, true))
                 && IMPLICATION(!is_zero_md(&dst_iter_md_),
-                           is_blocked(dst_iter_md_, 5));
+                        is_blocked(dst_iter_md_, 4, true))
+                && IMPLICATION(!is_zero_md(&dst_iter_c_md_),
+                        is_blocked(dst_iter_c_md_, 4, true));
 
         if (weights_layer_md_.format_kind == format_kind::rnn_packed)
-            ok = ok && (weights_layer_md_.format_desc.rnn_packed_desc.format
-                               == mkldnn_ldigo_p);
+            ok = ok
+                    && (weights_layer_md_.format_desc.rnn_packed_desc.format
+                            == dnnl_ldigo_p);
         else
             ok = ok && rnn_utils::is_ldigo(&weights_layer_md_);
 
         if (weights_iter_md_.format_kind == format_kind::rnn_packed)
-            ok = ok && (weights_iter_md_.format_desc.rnn_packed_desc.format
-                               == mkldnn_ldigo_p);
+            ok = ok
+                    && (weights_iter_md_.format_desc.rnn_packed_desc.format
+                            == dnnl_ldigo_p);
         else
             ok = ok && rnn_utils::is_ldigo(&weights_iter_md_);
 
-        ok = ok && IMPLICATION(!is_zero_md(&bias_md_),
-                           memory_desc_matches_tag(bias_md_, ldgo));
+        ok = ok
+                && IMPLICATION(!is_zero_md(&weights_peephole_md_),
+                        memory_desc_matches_tag(weights_peephole_md_, ldgo));
+
+        ok = ok
+                && IMPLICATION(!is_zero_md(&weights_projection_md_),
+                        memory_desc_matches_tag(weights_projection_md_, ldio));
+
+        ok = ok
+                && IMPLICATION(!is_zero_md(&bias_md_),
+                        memory_desc_matches_tag(bias_md_, ldgo));
 
         /* Int8 is supported only for packed weights */
         data_type_t weights_iter_dt = weights_iter_md_.data_type;
         data_type_t weights_layer_dt = weights_layer_md_.data_type;
-        ok = ok && IMPLICATION(
-                           weights_iter_dt == s8, weights_iter_md_.format_kind
-                                   == format_kind::rnn_packed);
-        ok = ok && IMPLICATION(
-                           weights_layer_dt == s8, weights_layer_md_.format_kind
-                                   == format_kind::rnn_packed);
+        ok = ok
+                && IMPLICATION(weights_iter_dt == s8,
+                        weights_iter_md_.format_kind
+                                == format_kind::rnn_packed);
+        ok = ok
+                && IMPLICATION(weights_layer_dt == s8,
+                        weights_layer_md_.format_kind
+                                == format_kind::rnn_packed);
 
         return ok ? status::success : status::unimplemented;
     }
@@ -122,18 +156,42 @@ protected:
 
         // Optional parameters
         if (with_src_iter() && src_iter_md_.format_kind == format_kind::any)
-            CHECK(memory_desc_init_by_tag(src_iter_md_, ldsnc));
+            CHECK(memory_desc_init_by_tag(src_iter_md_, ldnc));
+        if (with_src_iter_c() && src_iter_c_md_.format_kind == format_kind::any)
+            CHECK(memory_desc_init_by_tag(src_iter_c_md_, ldnc));
+        if (is_lstm_peephole()
+                && weights_peephole_md_.format_kind == format_kind::any)
+            CHECK(memory_desc_init_by_tag(weights_peephole_md_, ldgo));
+        if (is_lstm_projection()
+                && weights_projection_md_.format_kind == format_kind::any)
+            CHECK(memory_desc_init_by_tag(weights_projection_md_, ldoi));
         if (with_bias() && bias_md_.format_kind == format_kind::any)
             CHECK(memory_desc_init_by_tag(bias_md_, ldgo));
         if (with_dst_iter() && dst_iter_md_.format_kind == format_kind::any)
-            CHECK(memory_desc_init_by_tag(dst_iter_md_, ldsnc));
+            CHECK(memory_desc_init_by_tag(dst_iter_md_, ldnc));
+        if (with_dst_iter_c() && dst_iter_c_md_.format_kind == format_kind::any)
+            CHECK(memory_desc_init_by_tag(dst_iter_c_md_, ldnc));
 
-        if (with_src_iter() && diff_src_iter_md_.format_kind == format_kind::any)
-            CHECK(memory_desc_init_by_tag(diff_src_iter_md_, ldsnc));
+        if (with_src_iter()
+                && diff_src_iter_md_.format_kind == format_kind::any)
+            CHECK(memory_desc_init_by_tag(diff_src_iter_md_, ldnc));
+        if (with_src_iter_c()
+                && diff_src_iter_c_md_.format_kind == format_kind::any)
+            CHECK(memory_desc_init_by_tag(diff_src_iter_c_md_, ldnc));
+        if (is_lstm_peephole()
+                && diff_weights_peephole_md_.format_kind == format_kind::any)
+            CHECK(memory_desc_init_by_tag(diff_weights_peephole_md_, ldgo));
+        if (is_lstm_projection()
+                && diff_weights_projection_md_.format_kind == format_kind::any)
+            CHECK(memory_desc_init_by_tag(diff_weights_projection_md_, ldio));
         if (with_bias() && diff_bias_md_.format_kind == format_kind::any)
             CHECK(memory_desc_init_by_tag(diff_bias_md_, ldgo));
-        if (with_dst_iter() && diff_dst_iter_md_.format_kind == format_kind::any)
-            CHECK(memory_desc_init_by_tag(diff_dst_iter_md_, ldsnc));
+        if (with_dst_iter()
+                && diff_dst_iter_md_.format_kind == format_kind::any)
+            CHECK(memory_desc_init_by_tag(diff_dst_iter_md_, ldnc));
+        if (with_dst_iter_c()
+                && diff_dst_iter_c_md_.format_kind == format_kind::any)
+            CHECK(memory_desc_init_by_tag(diff_dst_iter_c_md_, ldnc));
 
         return status::success;
     }
@@ -142,50 +200,82 @@ protected:
         using namespace format_tag;
         using namespace types;
 
-        auto is_blocked = [&](memory_desc_t md, int ndims) {
-            return md.format_kind == format_kind::blocked && md.ndims == ndims;
+        auto is_blocked = [&](const memory_desc_t &md, int ndims,
+                                  bool require_last_dim_contiguous) {
+            return md.format_kind == format_kind::blocked && md.ndims == ndims
+                    && IMPLICATION(require_last_dim_contiguous,
+                            md.format_desc.blocking.strides[md.ndims - 1] == 1);
         };
 
         bool ok = true;
-        ok = ok && is_blocked(src_layer_md_, 3)
-                && is_blocked(dst_layer_md_, 3);
-        ok = ok && IMPLICATION(!is_zero_md(&src_iter_md_),
-                           is_blocked(src_iter_md_, 5))
+        ok = ok && is_blocked(src_layer_md_, 3, true)
+                && is_blocked(dst_layer_md_, 3, true);
+        ok = ok
+                && IMPLICATION(!is_zero_md(&src_iter_md_),
+                        is_blocked(src_iter_md_, 4, true))
+                && IMPLICATION(!is_zero_md(&src_iter_c_md_),
+                        is_blocked(src_iter_c_md_, 4, true))
                 && IMPLICATION(!is_zero_md(&dst_iter_md_),
-                           is_blocked(dst_iter_md_, 5));
+                        is_blocked(dst_iter_md_, 4, true))
+                && IMPLICATION(!is_zero_md(&dst_iter_c_md_),
+                        is_blocked(dst_iter_c_md_, 4, true));
 
         if (weights_layer_md_.format_kind == format_kind::rnn_packed)
-            ok = ok && (weights_layer_md_.format_desc.rnn_packed_desc.format
-                               == mkldnn_ldgoi_p);
+            ok = ok
+                    && (weights_layer_md_.format_desc.rnn_packed_desc.format
+                            == dnnl_ldgoi_p);
         else
             ok = ok && rnn_utils::is_ldgoi(&weights_layer_md_);
 
         if (weights_iter_md_.format_kind == format_kind::rnn_packed)
-            ok = ok && (weights_iter_md_.format_desc.rnn_packed_desc.format
-                               == mkldnn_ldgoi_p);
+            ok = ok
+                    && (weights_iter_md_.format_desc.rnn_packed_desc.format
+                            == dnnl_ldgoi_p);
         else
             ok = ok && rnn_utils::is_ldgoi(&weights_iter_md_);
 
-        ok = ok && IMPLICATION(!is_zero_md(&bias_md_),
-                           memory_desc_matches_tag(bias_md_, ldgo));
+        ok = ok
+                && IMPLICATION(!is_zero_md(&weights_peephole_md_),
+                        memory_desc_matches_tag(weights_peephole_md_, ldgo));
+        ok = ok
+                && IMPLICATION(!is_zero_md(&weights_projection_md_),
+                        memory_desc_matches_tag(weights_projection_md_, ldoi));
+        ok = ok
+                && IMPLICATION(!is_zero_md(&bias_md_),
+                        memory_desc_matches_tag(bias_md_, ldgo));
 
-        ok = ok && is_blocked(diff_src_layer_md_, 3)
-                && is_blocked(diff_dst_layer_md_, 3);
-        ok = ok && IMPLICATION(!is_zero_md(&diff_src_iter_md_),
-                           is_blocked(diff_src_iter_md_, 5))
+        ok = ok && is_blocked(diff_src_layer_md_, 3, true)
+                && is_blocked(diff_dst_layer_md_, 3, true);
+        ok = ok
+                && IMPLICATION(!is_zero_md(&diff_src_iter_md_),
+                        is_blocked(diff_src_iter_md_, 4, true))
+                && IMPLICATION(!is_zero_md(&diff_src_iter_c_md_),
+                        is_blocked(diff_src_iter_c_md_, 4, true))
                 && IMPLICATION(!is_zero_md(&diff_dst_iter_md_),
-                           is_blocked(diff_dst_iter_md_, 5));
+                        is_blocked(diff_dst_iter_md_, 4, true))
+                && IMPLICATION(!is_zero_md(&diff_dst_iter_c_md_),
+                        is_blocked(diff_dst_iter_c_md_, 4, true));
 
         ok = ok && rnn_utils::is_ldigo(&diff_weights_layer_md_)
                 && rnn_utils::is_ldigo(&diff_weights_iter_md_);
-        ok = ok && IMPLICATION(!is_zero_md(&diff_bias_md_),
-                           memory_desc_matches_tag(diff_bias_md_, ldgo));
+        ok = ok
+                && IMPLICATION(!is_zero_md(&diff_weights_peephole_md_),
+                        memory_desc_matches_tag(
+                                diff_weights_peephole_md_, ldgo));
+        ok = ok
+                && IMPLICATION(!is_zero_md(&diff_weights_projection_md_),
+                        memory_desc_matches_tag(
+                                diff_weights_projection_md_, ldio));
+        ok = ok
+                && IMPLICATION(!is_zero_md(&diff_bias_md_),
+                        memory_desc_matches_tag(diff_bias_md_, ldgo));
 
         return ok ? status::success : status::unimplemented;
     }
 };
-}
-}
-}
+
+} // namespace cpu
+} // namespace impl
+} // namespace dnnl
 
 #endif

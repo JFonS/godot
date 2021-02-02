@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2018 Intel Corporation
+* Copyright 2018-2020 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -14,49 +14,68 @@
 * limitations under the License.
 *******************************************************************************/
 
-#ifndef VERBOSE_HPP
-#define VERBOSE_HPP
+#ifndef COMMON_VERBOSE_HPP
+#define COMMON_VERBOSE_HPP
 
-#include <stdio.h>
 #include <cinttypes>
+#include <mutex>
+#include <stdio.h>
 
-#include "mkldnn_debug.h"
 #include "c_types_map.hpp"
+#include "dnnl_debug.h"
 #include "utils.hpp"
 #include "z_magic.hpp"
 
-namespace mkldnn {
+namespace dnnl {
 namespace impl {
 
 struct verbose_t {
     int level;
 };
 
-const verbose_t *mkldnn_verbose();
+int get_verbose();
 double get_msec();
-const char *get_isa_info();
 
 #if !defined(DISABLE_VERBOSE)
-#define MKLDNN_VERBOSE_BUF_LEN 1024
+#define DNNL_VERBOSE_BUF_LEN 1024
 #else
-#define MKLDNN_VERBOSE_BUF_LEN 1
+#define DNNL_VERBOSE_BUF_LEN 1
 #endif
 
-void init_info(batch_normalization_pd_t *s, char *buffer);
-void init_info(concat_pd_t *s, char *buffer);
-void init_info(convolution_pd_t *s, char *buffer);
-void init_info(deconvolution_pd_t *s, char *buffer);
-void init_info(eltwise_pd_t *s, char *buffer);
-void init_info(inner_product_pd_t *s, char *buffer);
-void init_info(lrn_pd_t *s, char *buffer);
-void init_info(pooling_pd_t *s, char *buffer);
-void init_info(reorder_pd_t *s, char *buffer);
-void init_info(rnn_pd_t *s, char *buffer);
-void init_info(shuffle_pd_t *s, char *buffer);
-void init_info(softmax_pd_t *s, char *buffer);
-void init_info(sum_pd_t *s, char *buffer);
+/// A container for primitive desc verbose string.
+struct primitive_desc_t;
+struct pd_info_t {
+    pd_info_t() = default;
+    pd_info_t(const pd_info_t &rhs)
+        : str_(rhs.str_), is_initialized_(rhs.is_initialized_) {}
+    pd_info_t &operator=(const pd_info_t &rhs) {
+        is_initialized_ = rhs.is_initialized_;
+        str_ = rhs.str_;
+        return *this;
+    }
 
-}
-}
+    const char *c_str() const { return str_.c_str(); }
+    bool is_initialized() const { return is_initialized_; }
+
+    void init(engine_t *engine, const primitive_desc_t *pd);
+
+private:
+    std::string str_;
+
+#if defined(DISABLE_VERBOSE)
+    bool is_initialized_ = true; // no verbose -> info is always ready
+#else
+    bool is_initialized_ = false;
+#endif
+
+    // Alas, `std::once_flag` cannot be manually set and/or copied (in terms of
+    // its state). Hence, when `pd_info_t` is copied the `initialization_flag_`
+    // is always reset. To avoid re-initialization we use an extra
+    // `is_initialized_` flag, that should be checked before calling `init()`.
+    std::once_flag initialization_flag_;
+};
+
+} // namespace impl
+} // namespace dnnl
 
 #endif

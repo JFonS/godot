@@ -1,67 +1,49 @@
-// ======================================================================== //
-// Copyright 2009-2019 Intel Corporation                                    //
-//                                                                          //
-// Licensed under the Apache License, Version 2.0 (the "License");          //
-// you may not use this file except in compliance with the License.         //
-// You may obtain a copy of the License at                                  //
-//                                                                          //
-//     http://www.apache.org/licenses/LICENSE-2.0                           //
-//                                                                          //
-// Unless required by applicable law or agreed to in writing, software      //
-// distributed under the License is distributed on an "AS IS" BASIS,        //
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. //
-// See the License for the specific language governing permissions and      //
-// limitations under the License.                                           //
-// ======================================================================== //
+// Copyright 2009-2020 Intel Corporation
+// SPDX-License-Identifier: Apache-2.0
 
 #include "common/tensor.h"
 #include "image.h"
 #include "node.h"
 #include "input_reorder.h"
 #include "output_reorder.h"
-#include "transfer_function.h"
+#include "output_copy.h"
+#include "color.h"
+#include "progress.h"
 
 #pragma once
 
 namespace oidn {
 
-  // Progress state
-  struct Progress
-  {
-    ProgressMonitorFunction func;
-    void* userPtr;
-    int taskCount;
-  };
-
   class Executable
   {
   public:
     virtual ~Executable() {}
-    virtual void execute(const Progress& progress, int taskIndex) = 0;
+    virtual void execute(Progress& progress) = 0;
+    virtual double getWorkAmount() const = 0; // for progress reporting
   };
 
-  template<int K>
   class Network : public Executable
   {
   public:
-    Network(const Ref<Device>& device, const std::map<std::string, Tensor>& weightMap);
+    Network(const Ref<Device>& device, const std::map<std::string, Tensor>& weightsMap);
 
-    void execute(const Progress& progress, int taskIndex) override;
+    void execute(Progress& progress) override;
+    double getWorkAmount() const override;
 
-    std::shared_ptr<memory> allocTensor(const memory::dims& dims,
+    std::shared_ptr<memory> allocMemory(const memory::dims& dims,
                                         memory::format_tag format = memory::format_tag::any,
                                         void* data = nullptr);
 
-    std::shared_ptr<memory> castTensor(const memory::dims& dims,
+    std::shared_ptr<memory> castMemory(const memory::dims& dims,
                                        const std::shared_ptr<memory>& src,
                                        size_t srcOffset = 0,
                                        memory::format_tag format = memory::format_tag::any);
 
-    std::shared_ptr<memory> castTensor(const memory::dims& dims,
+    std::shared_ptr<memory> castMemory(const memory::dims& dims,
                                        const std::shared_ptr<memory>& src,
                                        const memory::dims& srcOffset);
 
-    void zeroTensor(const std::shared_ptr<memory>& dst);
+    void zeroMemory(const std::shared_ptr<memory>& dst);
 
     memory::dims getInputReorderDims(const memory::dims& srcDims, int alignment);
 
@@ -69,11 +51,13 @@ namespace oidn {
                                           const Image& albedo,
                                           const Image& normal,
                                           const std::shared_ptr<TransferFunction>& transferFunc,
+                                          bool hdr,
                                           int alignment,
                                           const std::shared_ptr<memory>& userDst = nullptr);
 
     std::shared_ptr<Node> addOutputReorder(const std::shared_ptr<memory>& src,
                                            const std::shared_ptr<TransferFunction>& transferFunc,
+                                           bool hdr,
                                            const Image& output);
 
     memory::dims getConvDims(const std::string& name, const memory::dims& srcDims);
@@ -93,7 +77,7 @@ namespace oidn {
     memory::dims getConcatDims(const memory::dims& src1Dims, const memory::dims& src2Dims);
 
     std::shared_ptr<Node> addAutoexposure(const Image& color,
-                                          const std::shared_ptr<HDRTransferFunction>& transferFunc);
+                                          const std::shared_ptr<TransferFunction>& transferFunc);
 
     void finalize();
 
@@ -101,12 +85,18 @@ namespace oidn {
     Ref<Device> device;
     engine eng;
     stream sm;
+    int K;                     // block size
+    memory::format_tag nChwKc; // native blocked format
+
     std::vector<std::shared_ptr<Node>> nodes;
-    std::map<std::string, Tensor> weightMap;
+    std::map<std::string, Tensor> weightsMap;
 
     // Memory allocation statistics
     size_t activationAllocBytes = 0; // number of allocated activation bytes
     size_t totalAllocBytes      = 0; // total number of allocated bytes
+
+    std::shared_ptr<memory> padWeights(const Tensor& src);
+    std::shared_ptr<memory> padBias(const Tensor& src);
   };
 
 } // namespace oidn

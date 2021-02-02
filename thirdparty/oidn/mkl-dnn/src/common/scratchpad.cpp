@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2017-2018 Intel Corporation
+* Copyright 2017-2020 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -14,39 +14,52 @@
 * limitations under the License.
 *******************************************************************************/
 
-#include "mkldnn_thread.hpp"
+#include <memory>
+
+#include "engine.hpp"
 #include "utils.hpp"
 
 #include "scratchpad.hpp"
 
-namespace mkldnn {
+namespace dnnl {
 namespace impl {
 
-/* Allocating memory buffers on a page boundary to reduce TLB/page misses */
-const size_t page_size = 2097152;
+namespace {
+
+memory_storage_t *create_scratchpad_memory_storage(
+        engine_t *engine, size_t size) {
+    memory_storage_t *mem_storage = nullptr;
+    auto status = engine->create_memory_storage(&mem_storage, size);
+    UNUSED(status);
+    return mem_storage;
+}
+
+} // namespace
 
 /*
   Implementation of the scratchpad_t interface that is compatible with
   a concurrent execution
 */
-struct concurent_scratchpad_t : public scratchpad_t {
-    concurent_scratchpad_t(size_t size) {
+struct concurrent_scratchpad_t : public scratchpad_t {
+    concurrent_scratchpad_t(engine_t *engine, size_t size) {
+        auto *mem_storage = create_scratchpad_memory_storage(engine, size);
         size_ = size;
-        scratchpad_ = (char *) malloc(size, page_size);
-        assert(scratchpad_ != nullptr);
+        if (mem_storage == nullptr) size_ = 0;
+
+        mem_storage_.reset(mem_storage);
     }
 
-    ~concurent_scratchpad_t() {
-        free(scratchpad_);
+    const memory_storage_t *get_memory_storage() const override {
+        return mem_storage_.get();
     }
 
-    virtual char *get() const {
-        return scratchpad_;
-    }
+    size_t size() const override { return size_; }
 
 private:
-    char *scratchpad_;
+    std::unique_ptr<memory_storage_t> mem_storage_;
     size_t size_;
+
+    DNNL_DISALLOW_COPY_AND_ASSIGN(concurrent_scratchpad_t);
 };
 
 /*
@@ -55,12 +68,18 @@ private:
 */
 
 struct global_scratchpad_t : public scratchpad_t {
-    global_scratchpad_t(size_t size) {
+    global_scratchpad_t(engine_t *engine, size_t size) {
+        UNUSED(engine);
         if (size > size_) {
-            if (scratchpad_ != nullptr) free(scratchpad_);
-            size_ = size;
-            scratchpad_ = (char *) malloc(size, page_size);
-            assert(scratchpad_ != nullptr);
+            delete mem_storage_;
+            // Try to expand the global scratchpad to the necessary size
+            mem_storage_ = create_scratchpad_memory_storage(engine, size);
+            if (mem_storage_ == nullptr) {
+                // Recreate scratchpad with original capacity
+                mem_storage_ = create_scratchpad_memory_storage(engine, size_);
+                if (mem_storage_ == nullptr) size_ = 0;
+            } else
+                size_ = size;
         }
         reference_count_++;
     }
@@ -68,45 +87,53 @@ struct global_scratchpad_t : public scratchpad_t {
     ~global_scratchpad_t() {
         reference_count_--;
         if (reference_count_ == 0) {
-            free(scratchpad_);
-            scratchpad_ = nullptr;
+            delete mem_storage_;
+            mem_storage_ = nullptr;
             size_ = 0;
         }
     }
 
-    virtual char *get() const {
-        return scratchpad_;
+    const memory_storage_t *get_memory_storage() const override {
+        return mem_storage_;
     }
 
+    size_t size() const override { return size_; }
+
 private:
-    /*
-      Using thread-local here is unnecessary and even buggy! All threads
-      actually share the same scratchpad, which is created and queried only
-      on the main thread. If the scratchpad is queried on some thread other
-      than the one it was created on (e.g. the application calls the API from
-      multiple threads), thread-local causes a segfault because the scratchpad
-      is uninitialized on the current thread.
-    */
-    /*thread_local*/ static char *scratchpad_;
-    /*thread_local*/ static size_t size_;
-    /*thread_local*/ static unsigned int reference_count_;
+    thread_local static memory_storage_t *mem_storage_;
+    thread_local static size_t size_;
+    thread_local static unsigned int reference_count_;
 };
 
-/*thread_local*/ char *global_scratchpad_t::scratchpad_ = nullptr;
-/*thread_local*/ size_t global_scratchpad_t::size_ = 0;
-/*thread_local*/ unsigned int global_scratchpad_t::reference_count_ = 0;
-
+// CAVEAT: avoid having non-trivially-constructed thread-local objects. Their
+// construction order may depends on the program execution and the final
+// destruction order may be such that a thread-local object is destroyed
+// before all its users are destroyed thus causing a crash at exit.
+// Tested by tests/gtests/test_global_scratchad.cpp
+thread_local memory_storage_t *global_scratchpad_t::mem_storage_ = nullptr;
+thread_local size_t global_scratchpad_t::size_ = 0;
+thread_local unsigned int global_scratchpad_t::reference_count_ = 0;
 
 /*
    Scratchpad creation routine
 */
-scratchpad_t *create_scratchpad(size_t size) {
-#ifndef MKLDNN_ENABLE_CONCURRENT_EXEC
-    return new global_scratchpad_t(size);
+scratchpad_t *create_scratchpad(
+        engine_t *engine, size_t size, bool use_global_scratchpad) {
+#ifndef DNNL_ENABLE_CONCURRENT_EXEC
+    /*
+     * TODO: global scratchpad should be able to handle memory
+     * from different engines.
+     * lock global scratchpad to work with CPU engine only.
+     */
+    if (use_global_scratchpad && engine->kind() == engine_kind_t::dnnl_cpu)
+        return new global_scratchpad_t(engine, size);
+    else
+        return new concurrent_scratchpad_t(engine, size);
 #else
-    return new concurent_scratchpad_t(size);
+    UNUSED(use_global_scratchpad);
+    return new concurrent_scratchpad_t(engine, size);
 #endif
 }
 
-}
-}
+} // namespace impl
+} // namespace dnnl

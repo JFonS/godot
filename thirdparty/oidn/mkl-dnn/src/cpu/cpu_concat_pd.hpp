@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2016-2018 Intel Corporation
+* Copyright 2016-2020 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -14,28 +14,29 @@
 * limitations under the License.
 *******************************************************************************/
 
-#ifndef CPU_CONCAT_PD_HPP
-#define CPU_CONCAT_PD_HPP
+#ifndef CPU_CPU_CONCAT_PD_HPP
+#define CPU_CPU_CONCAT_PD_HPP
 
 #include <assert.h>
 
-#include "c_types_map.hpp"
-#include "concat_pd.hpp"
-#include "type_helpers.hpp"
-#include "utils.hpp"
+#include "common/c_types_map.hpp"
+#include "common/concat_pd.hpp"
+#include "common/type_helpers.hpp"
+#include "common/utils.hpp"
+#include "cpu/cpu_engine.hpp"
 
-namespace mkldnn {
+namespace dnnl {
 namespace impl {
 namespace cpu {
 
-struct cpu_concat_pd_t: public concat_pd_t {
+struct cpu_concat_pd_t : public concat_pd_t {
     using concat_pd_t::concat_pd_t;
 };
 
-}
-}
-}
+} // namespace cpu
+} // namespace impl
+} // namespace dnnl
 
 #endif
 
-// vim: et ts=4 sw=4 cindent cino^=l0,\:0,N-s
+// vim: et ts=4 sw=4 cindent cino+=l0,\:4,N-s

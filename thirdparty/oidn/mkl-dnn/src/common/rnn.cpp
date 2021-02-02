@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2018 Intel Corporation
+* Copyright 2018-2020 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -14,387 +14,700 @@
 * limitations under the License.
 *******************************************************************************/
 
-#include "mkldnn.h"
+#include <initializer_list>
+
+#include "dnnl.h"
 
 #include "c_types_map.hpp"
 #include "type_helpers.hpp"
 #include "utils.hpp"
-#include "cpu/gemm/os_blas.hpp"
 
-using namespace mkldnn::impl;
-using namespace mkldnn::impl::status;
-using namespace mkldnn::impl::types;
-using namespace mkldnn::impl::utils;
+namespace dnnl {
+namespace impl {
+namespace rnn {
+
+int get_gates_count(dnnl_alg_kind_t cell_kind) {
+    switch (cell_kind) {
+        case dnnl::impl::alg_kind::vanilla_rnn: return 1;
+        case dnnl::impl::alg_kind::vanilla_gru: return 3;
+        case dnnl::impl::alg_kind::lbr_gru: return 3;
+        case dnnl::impl::alg_kind::vanilla_lstm: return 4;
+        default: assert(!"unknown cell kind"); return 0;
+    }
+    return 0;
+}
+
+} // namespace rnn
+} // namespace impl
+} // namespace dnnl
 
 namespace {
-memory_desc_t copy_maybe_null(const memory_desc_t *md) {
-    return md ? *md : zero_md();
+using namespace dnnl::impl;
+using namespace dnnl::impl::status;
+using namespace dnnl::impl::types;
+using namespace dnnl::impl::utils;
+
+void maybe_init_md(memory_desc_t &md, const memory_desc_t *with_md) {
+    if (with_md) md = *with_md;
 }
 
-rnn_desc_t zero_rnn_desc() {
-    auto rd = rnn_desc_t();
-    rd.src_layer_desc = zero_md();
-    rd.src_iter_desc = zero_md();
-    rd.weights_layer_desc = zero_md();
-    rd.weights_iter_desc = zero_md();
-    rd.bias_desc = zero_md();
-    rd.dst_layer_desc = zero_md();
-    rd.dst_iter_desc = zero_md();
-    rd.diff_src_layer_desc = zero_md();
-    rd.diff_src_iter_desc = zero_md();
-    rd.diff_weights_layer_desc = zero_md();
-    rd.diff_weights_iter_desc = zero_md();
-    rd.diff_bias_desc = zero_md();
-    rd.diff_dst_layer_desc = zero_md();
-    rd.diff_dst_iter_desc = zero_md();
-    return rd;
-}
+bool xnor_md(const memory_desc_t *a_md, const memory_desc_t *b_md) {
+    return is_zero_md(a_md) == is_zero_md(b_md);
 }
 
-/* Public C Api */
+status_t check_runtime_dims_or_strides(
+        std::initializer_list<const memory_desc_t *> l) {
+    bool runtime_dims_or_strides = false;
+    for (auto md : l)
+        runtime_dims_or_strides = runtime_dims_or_strides
+                || memory_desc_wrapper(md).has_runtime_dims_or_strides();
+    return runtime_dims_or_strides ? unimplemented : success;
+}
 
-status_t mkldnn_rnn_cell_desc_init(rnn_cell_desc_t *rnn_cell_desc,
-        mkldnn_alg_kind_t cell_kind, mkldnn_alg_kind_t act_f,
-        unsigned int flags, float alpha, float clipping) {
-    using namespace mkldnn::impl::alg_kind;
+template <typename... DTs>
+bool expect_dt(const memory_desc_t &md, DTs... dts) {
+    return IMPLICATION(!is_zero_md(&md), utils::one_of(md.data_type, dts...));
+}
 
-    bool args_ok = true
-            && one_of(cell_kind, vanilla_rnn, vanilla_lstm, vanilla_gru,
-                    gru_linear_before_reset)
-            && IMPLICATION(cell_kind == vanilla_rnn,
-                    one_of(act_f, eltwise_relu, eltwise_tanh, eltwise_logistic));
-    if (!args_ok)
-        return invalid_arguments;
+status_t expect_dims(const memory_desc_t &md, std::initializer_list<dim_t> dims,
+        bool allow_zero = true) {
+    if (is_zero_md(&md))
+        return (allow_zero || dims.size() == 0) ? success : invalid_arguments;
 
-    auto rcd = mkldnn_rnn_cell_desc_t();
+    if (md.ndims != (int)dims.size()) return invalid_arguments;
 
-    rcd.cell_kind = cell_kind;
-    rcd.activation_kind = act_f;
-    rcd.flags = flags;
-    rcd.alpha = rcd.flags & mkldnn_rnn_cell_with_relu ? alpha : 0;
-    rcd.clipping = rcd.flags & mkldnn_rnn_cell_with_clipping ? clipping : 0;
-
-    *rnn_cell_desc = rcd;
+    int d_in_md = 0;
+    for (auto d : dims)
+        if (d != md.dims[d_in_md++]) return invalid_arguments;
 
     return success;
 }
 
-int mkldnn_rnn_cell_get_gates_count(const rnn_cell_desc_t *rnn_cell_desc) {
-    switch (rnn_cell_desc->cell_kind) {
-    case mkldnn::impl::alg_kind::vanilla_rnn: return 1;
-    case mkldnn::impl::alg_kind::vanilla_gru: return 3;
-    case mkldnn::impl::alg_kind::gru_linear_before_reset: return 3;
-    case mkldnn::impl::alg_kind::vanilla_lstm: return 4;
-    default: assert(!"unknown cell kind"); return 0;
-    }
-    return 0;
-}
-
-int mkldnn_rnn_cell_get_states_count(const rnn_cell_desc_t *rnn_cell_desc) {
-    switch (rnn_cell_desc->cell_kind) {
-    case mkldnn::impl::alg_kind::vanilla_rnn: return 1;
-    case mkldnn::impl::alg_kind::vanilla_gru: return 1;
-    case mkldnn::impl::alg_kind::gru_linear_before_reset: return 1;
-    case mkldnn::impl::alg_kind::vanilla_lstm: return 2;
-    default: assert(!"unknown cell kind"); return 0;
-    }
-    return 0;
-}
-
-status_t check_data_type_consistency_fwd(const rnn_cell_desc_t *rnn_cell_desc,
-        prop_kind_t prop_kind, const memory_desc_t *src_layer_desc,
-        const memory_desc_t *src_iter_desc,
-        const memory_desc_t *weights_layer_desc,
-        const memory_desc_t *weights_iter_desc, const memory_desc_t *bias_desc,
-        const memory_desc_t *dst_layer_desc,
-        const memory_desc_t *dst_iter_desc) {
+status_t check_data_type_consistency_fwd(const rnn_desc_t &r) {
     using namespace data_type;
-    data_type_t src_layer_dt = src_layer_desc->data_type;
-    data_type_t dst_layer_dt = dst_layer_desc->data_type;
-    data_type_t weights_iter_dt = weights_iter_desc->data_type;
-    data_type_t weights_layer_dt = weights_layer_desc->data_type;
+    data_type_t src_layer_dt = r.src_layer_desc.data_type;
+    data_type_t dst_layer_dt = r.dst_layer_desc.data_type;
+    data_type_t weights_iter_dt = r.weights_iter_desc.data_type;
+    data_type_t weights_layer_dt = r.weights_layer_desc.data_type;
+
+    bool is_forward = !(r.prop_kind == prop_kind::backward);
+    bool is_inference = r.prop_kind == prop_kind::forward_inference;
+    bool is_lstm = r.cell_kind == dnnl_vanilla_lstm;
+
+    bool cell_state_check = expect_dt(r.src_iter_c_desc, f32, f16)
+            && expect_dt(r.dst_iter_c_desc, f32, f16);
 
     bool is_f32 = everyone_is(f32, src_layer_dt, dst_layer_dt, weights_iter_dt,
                           weights_layer_dt)
-            && IMPLICATION(!is_zero_md(src_iter_desc),
-                          src_iter_desc->data_type == f32)
-            && IMPLICATION(!is_zero_md(dst_iter_desc),
-                          dst_iter_desc->data_type == f32)
-            && IMPLICATION(!is_zero_md(bias_desc), bias_desc->data_type == f32);
+            && expect_dt(r.src_iter_desc, f32)
+            && expect_dt(r.weights_peephole_desc, f32)
+            && expect_dt(r.weights_projection_desc, f32)
+            && expect_dt(r.dst_iter_desc, f32) && expect_dt(r.bias_desc, f32);
 
-#if USE_MKL_PACKED_GEMM
-    bool is_u8u8u8 = src_layer_dt == u8
-            && IMPLICATION(!is_zero_md(src_iter_desc),
-                             src_iter_desc->data_type == u8)
-            && IMPLICATION(!is_zero_md(dst_iter_desc),
-                             dst_iter_desc->data_type == u8)
+    bool is_bf16 = everyone_is(bf16, src_layer_dt, dst_layer_dt,
+                           weights_iter_dt, weights_layer_dt)
+            && expect_dt(r.src_iter_desc, bf16)
+            && expect_dt(r.weights_peephole_desc, f32)
+            && r.weights_projection_desc.data_type == data_type::undef
+            && expect_dt(r.dst_iter_desc, bf16) && expect_dt(r.bias_desc, f32);
+
+    bool is_f16 = is_forward
+            && everyone_is(f16, src_layer_dt, dst_layer_dt, weights_iter_dt,
+                    weights_layer_dt)
+            && expect_dt(r.src_iter_desc, f16)
+            && expect_dt(r.weights_peephole_desc, f16)
+            && r.weights_peephole_desc.data_type == data_type::undef
+            && expect_dt(r.dst_iter_desc, f16) && expect_dt(r.bias_desc, f16);
+
+    bool is_u8u8u8 = is_inference && is_lstm && src_layer_dt == u8
             && one_of(dst_layer_dt, u8, f32)
             && everyone_is(s8, weights_iter_dt, weights_layer_dt)
-            && IMPLICATION(!is_zero_md(bias_desc), bias_desc->data_type == f32);
+            && expect_dt(r.src_iter_desc, u8)
+            && expect_dt(r.src_iter_c_desc, f32)
+            && r.weights_peephole_desc.data_type == data_type::undef
+            && r.weights_projection_desc.data_type == data_type::undef
+            && expect_dt(r.dst_iter_desc, u8)
+            && expect_dt(r.dst_iter_c_desc, f32) && expect_dt(r.bias_desc, f32);
 
-    bool is_f32u8f32 = src_layer_dt == u8
-            && IMPLICATION(!is_zero_md(src_iter_desc),
-                               src_iter_desc->data_type == f32)
-            && IMPLICATION(!is_zero_md(dst_iter_desc),
-                               dst_iter_desc->data_type == f32)
-            && one_of(dst_layer_dt, u8, f32)
+    bool is_f32u8f32 = is_inference && is_lstm && src_layer_dt == u8
             && everyone_is(s8, weights_iter_dt, weights_layer_dt)
-            && IMPLICATION(!is_zero_md(bias_desc), bias_desc->data_type == f32);
+            && r.weights_peephole_desc.data_type == data_type::undef
+            && r.weights_projection_desc.data_type == data_type::undef
+            && one_of(dst_layer_dt, u8, f32) && expect_dt(r.src_iter_desc, f32)
+            && expect_dt(r.dst_iter_desc, f32) && expect_dt(r.bias_desc, f32);
 
-    bool is_inference = prop_kind == prop_kind::forward_inference;
-    bool is_lstm = rnn_cell_desc->cell_kind == mkldnn_vanilla_lstm;
-
-    return (is_f32 || ((is_u8u8u8 || is_f32u8f32) && is_lstm && is_inference))
+    return cell_state_check
+                    && (is_f32 || is_bf16 || is_f16 || is_u8u8u8 || is_f32u8f32)
             ? success
             : unimplemented;
-#else
-    return is_f32 ? success : unimplemented;
-#endif
 }
 
-status_t check_dim_consistency(const rnn_cell_desc_t *rnn_cell_desc,
-        rnn_direction_t direction, int L, int D, int T, int N, int S, int G,
-        int SLC, int SIC, int DLC, int DIC, const memory_desc_t *src_layer_desc,
-        const memory_desc_t *src_iter_desc,
-        const memory_desc_t *weights_layer_desc,
-        const memory_desc_t *weights_iter_desc, const memory_desc_t *bias_desc,
-        const memory_desc_t *dst_layer_desc,
-        const memory_desc_t *dst_iter_desc) {
-    bool args_ok;
+status_t check_data_type_consistency_bwd(const rnn_desc_t &r) {
+    using namespace data_type;
 
-    // * algorithm specific
-    args_ok = true
-        && IMPLICATION(rnn_cell_desc->cell_kind == alg_kind::vanilla_gru,
-                       DIC == SIC);
-    if (!args_ok) return invalid_arguments;
-    int extra_bias =
-            rnn_cell_desc->cell_kind == alg_kind::gru_linear_before_reset;
+    /* We require diffs to be f32, even for bf16 */
+    bool are_diff_f32 = everyone_is(f32, r.diff_src_layer_desc.data_type,
+                                r.diff_dst_layer_desc.data_type,
+                                r.diff_weights_iter_desc.data_type,
+                                r.diff_weights_layer_desc.data_type)
+            && expect_dt(r.diff_src_iter_desc, f32)
+            && expect_dt(r.diff_dst_iter_desc, f32)
+            && expect_dt(r.diff_weights_peephole_desc, f32)
+            && expect_dt(r.diff_weights_projection_desc, f32)
+            && expect_dt(r.diff_bias_desc, f32)
+            && expect_dt(r.diff_src_iter_c_desc, f32)
+            && expect_dt(r.diff_dst_iter_c_desc, f32);
 
-    // * on num layers
-    args_ok = true
-        && L == weights_layer_desc->dims[0]
-        && L == weights_iter_desc->dims[0]
-        && IMPLICATION(!is_zero_md(bias_desc), L == bias_desc->dims[0])
-        && IMPLICATION(!is_zero_md(src_iter_desc), L == src_iter_desc->dims[0])
-        && IMPLICATION(!is_zero_md(dst_iter_desc), L == dst_iter_desc->dims[0]);
-    if (!args_ok) return invalid_arguments;
+    return are_diff_f32 ? success : unimplemented;
+}
 
-    // * on num directions
-    args_ok = true
-        && D == weights_layer_desc->dims[1]
-        && D == weights_iter_desc->dims[1]
-        && IMPLICATION(!is_zero_md(bias_desc), D == bias_desc->dims[1])
-        && IMPLICATION(!is_zero_md(src_iter_desc), D == src_iter_desc->dims[1])
-        && IMPLICATION(!is_zero_md(dst_iter_desc), D == dst_iter_desc->dims[1]);
-    if (!args_ok) return invalid_arguments;
+status_t check_dim_consistency(const rnn_desc_t &r) {
+    const bool is_lstm_projection = r.cell_kind == dnnl_vanilla_lstm
+            && !is_zero_md(&r.weights_projection_desc);
 
-    // * on num iterations
-    args_ok = true
-        && T == src_layer_desc->dims[0]
-        && T == dst_layer_desc->dims[0];
-    if (!args_ok) return invalid_arguments;
+    const dim_t L = r.weights_layer_desc.dims[0];
+    const dim_t T = r.src_layer_desc.dims[0];
+    const dim_t N = r.src_layer_desc.dims[1];
+    const dim_t D = one_of(r.direction, dnnl_unidirectional_left2right,
+                            dnnl_unidirectional_right2left)
+            ? 1
+            : 2;
+    const dim_t G = rnn::get_gates_count(r.cell_kind);
+    const dim_t SLC = r.src_layer_desc.dims[2];
+    const dim_t SIC = r.weights_iter_desc.dims[2];
+    const dim_t DLC = r.dst_layer_desc.dims[2];
+    const dim_t DHC = r.weights_layer_desc.dims[4];
+    const dim_t DIC
+            = is_lstm_projection ? r.weights_projection_desc.dims[3] : DHC;
 
-    // * on mb
-    args_ok = true
-        && N == src_layer_desc->dims[1]
-        && N == dst_layer_desc->dims[1]
-        && IMPLICATION(!is_zero_md(src_iter_desc), N == src_iter_desc->dims[3])
-        && IMPLICATION(!is_zero_md(dst_iter_desc), N == dst_iter_desc->dims[3]);
-    if (!args_ok) return invalid_arguments;
+    const bool extra_bias = r.cell_kind == alg_kind::lbr_gru;
+    const dim_t dlc_multiplier
+            = (r.direction == dnnl_bidirectional_concat) ? 2 : 1;
 
-    // * on num gates
-    args_ok = true
-        && G == mkldnn_rnn_cell_get_gates_count(rnn_cell_desc)
-        && G == weights_layer_desc->dims[3]
-        && G == weights_iter_desc->dims[3]
-        && IMPLICATION(!is_zero_md(bias_desc),
-                G + extra_bias == bias_desc->dims[2]);
+    bool args_ok = IMPLICATION(utils::one_of(r.cell_kind, alg_kind::vanilla_gru,
+                                       alg_kind::lbr_gru),
+                           SIC == DHC)
+            && dlc_multiplier * DIC == DLC
+            && IMPLICATION(L > 1, dlc_multiplier * SLC == DLC)
+            && IMPLICATION(T > 1, SIC == DIC);
     if (!args_ok) return invalid_arguments;
 
-    // * on num states
-    args_ok = true
-        && S == mkldnn_rnn_cell_get_states_count(rnn_cell_desc)
-        && IMPLICATION(!is_zero_md(src_iter_desc), S == src_iter_desc->dims[2])
-        && IMPLICATION(!is_zero_md(dst_iter_desc), S == dst_iter_desc->dims[2]);
-    if (!args_ok) return invalid_arguments;
+    CHECK(expect_dims(r.src_layer_desc, {T, N, SLC}, false));
+    CHECK(expect_dims(r.src_iter_desc, {L, D, N, SIC}));
+    CHECK(expect_dims(r.src_iter_c_desc, {L, D, N, DHC}));
+    CHECK(expect_dims(r.weights_layer_desc, {L, D, SLC, G, DHC}, false));
+    CHECK(expect_dims(r.weights_iter_desc, {L, D, SIC, G, DHC}, false));
+    CHECK(expect_dims(r.weights_peephole_desc, {L, D, 3, DHC}));
+    CHECK(expect_dims(r.weights_projection_desc, {L, D, DHC, DIC}));
+    CHECK(expect_dims(r.bias_desc, {L, D, G + extra_bias, DHC}));
+    CHECK(expect_dims(r.dst_layer_desc, {T, N, DLC}, false));
+    CHECK(expect_dims(r.dst_iter_desc, {L, D, N, DIC}));
+    CHECK(expect_dims(r.dst_iter_c_desc, {L, D, N, DHC}));
 
-    // * on slc
-    args_ok = true
-        && SLC == weights_layer_desc->dims[2]
-        && SLC == src_layer_desc->dims[2];
-    if (!args_ok) return invalid_arguments;
-
-    // * on sic
-    args_ok = true
-        && SIC == weights_iter_desc->dims[2]
-        && IMPLICATION(!is_zero_md(src_iter_desc),
-                SIC == src_iter_desc->dims[4]);
-    if (!args_ok) return invalid_arguments;
-
-    // * on dlc
-    int dlc_multiplier = (direction == mkldnn_bidirectional_concat) ? 2 : 1;
-    args_ok = true
-        && DLC == dlc_multiplier * DIC
-        && DLC == dst_layer_desc->dims[2];
-    if (!args_ok) return invalid_arguments;
-
-    // * on dic
-    args_ok = true
-        && DIC == weights_layer_desc->dims[4]
-        && DIC == weights_iter_desc->dims[4]
-        && IMPLICATION(!is_zero_md(bias_desc), DIC == bias_desc->dims[3])
-        && IMPLICATION(!is_zero_md(dst_iter_desc),
-                DIC == dst_iter_desc->dims[4]);
-    if (!args_ok) return invalid_arguments;
-
-    // * unrolling/fusion conditions
-    args_ok = true
-        && IMPLICATION(L > 1, (dlc_multiplier * SLC) == DLC)
-        && IMPLICATION(T > 1, SIC == DIC);
-    if (!args_ok) return invalid_arguments;
+    if (r.prop_kind == prop_kind::backward) {
+        CHECK(expect_dims(r.diff_src_layer_desc, {T, N, SLC}, false));
+        CHECK(expect_dims(r.diff_src_iter_desc, {L, D, N, SIC}));
+        CHECK(expect_dims(r.diff_src_iter_c_desc, {L, D, N, DHC}));
+        CHECK(expect_dims(
+                r.diff_weights_layer_desc, {L, D, SLC, G, DHC}, false));
+        CHECK(expect_dims(
+                r.diff_weights_iter_desc, {L, D, SIC, G, DHC}, false));
+        CHECK(expect_dims(r.diff_weights_peephole_desc, {L, D, 3, DHC}));
+        CHECK(expect_dims(r.diff_weights_projection_desc, {L, D, DHC, DIC}));
+        CHECK(expect_dims(r.diff_bias_desc, {L, D, G + extra_bias, DHC}));
+        CHECK(expect_dims(r.diff_dst_layer_desc, {T, N, DLC}, false));
+        CHECK(expect_dims(r.diff_dst_iter_desc, {L, D, N, DIC}));
+        CHECK(expect_dims(r.diff_dst_iter_c_desc, {L, D, N, DHC}));
+    }
 
     return success;
 }
 
-status_t MKLDNN_API mkldnn_rnn_forward_desc_init(mkldnn_rnn_desc_t *rnn_desc,
-        prop_kind_t prop_kind, const rnn_cell_desc_t *rnn_cell_desc,
+status_t rnn_common_fwd_desc_init(dnnl_rnn_desc_t *rnn_desc,
+        prop_kind_t prop_kind, dnnl_alg_kind_t cell_kind,
         const rnn_direction_t direction, const memory_desc_t *src_layer_desc,
         const memory_desc_t *src_iter_desc,
+        const memory_desc_t *src_iter_c_desc,
         const memory_desc_t *weights_layer_desc,
-        const memory_desc_t *weights_iter_desc, const memory_desc_t *bias_desc,
-        const memory_desc_t *dst_layer_desc,
-        const memory_desc_t *dst_iter_desc) {
-    bool args_ok = true && rnn_cell_desc != nullptr
-            && !any_null(src_layer_desc, weights_layer_desc, weights_iter_desc,
-                       dst_layer_desc);
+        const memory_desc_t *weights_iter_desc,
+        const memory_desc_t *weights_peephole_desc,
+        const memory_desc_t *weights_projection_desc,
+        const memory_desc_t *bias_desc, const memory_desc_t *dst_layer_desc,
+        const memory_desc_t *dst_iter_desc,
+        const memory_desc_t *dst_iter_c_desc, unsigned flags,
+        dnnl_alg_kind_t activation = dnnl_alg_kind_undef, float alpha = 0.0f,
+        float beta = 0.0f) {
+
+    // check that a supported cell kind has been passed
+    bool args_ok = one_of(cell_kind, dnnl_vanilla_rnn, dnnl_vanilla_lstm,
+            dnnl_vanilla_gru, dnnl_lbr_gru);
     if (!args_ok) return invalid_arguments;
 
-    //check dimensions consistency
-    int L = weights_layer_desc->dims[0];
-    int T = src_layer_desc->dims[0];
-    int N = src_layer_desc->dims[1];
-    const int D = one_of(direction, mkldnn_unidirectional_left2right,
-                          mkldnn_unidirectional_right2left) ?
-            1 :
-            2;
-    int G = mkldnn_rnn_cell_get_gates_count(rnn_cell_desc);
-    int S = mkldnn_rnn_cell_get_states_count(rnn_cell_desc);
-    int SLC = src_layer_desc->dims[2];
-    int SIC = weights_iter_desc->dims[2];
-    int DLC = dst_layer_desc->dims[2];
-    int DIC = weights_layer_desc->dims[4];
+    // check that all mandatory parameters are non-null
+    args_ok = args_ok
+            && !any_null(src_layer_desc, weights_layer_desc, weights_iter_desc,
+                    dst_layer_desc);
+    if (!args_ok) return invalid_arguments;
 
-    CHECK(check_dim_consistency(rnn_cell_desc, direction, L, D, T, N, S,
-            G, SLC, SIC, DLC, DIC, src_layer_desc, src_iter_desc,
-            weights_layer_desc, weights_iter_desc, bias_desc, dst_layer_desc,
-            dst_iter_desc));
+    if (cell_kind == dnnl_vanilla_rnn) {
+        using namespace alg_kind;
+        args_ok = args_ok
+                && one_of(activation, eltwise_relu, eltwise_tanh,
+                        eltwise_logistic);
+        if (!args_ok) return invalid_arguments;
+    }
 
-    CHECK(check_data_type_consistency_fwd(rnn_cell_desc, prop_kind,
-            src_layer_desc, src_iter_desc, weights_layer_desc,
-            weights_iter_desc, bias_desc, dst_layer_desc, dst_iter_desc));
+    if (cell_kind == dnnl_vanilla_lstm) {
+        // check if optional *_iter is provided then *_iter_c is provided too
+        args_ok = args_ok && xnor_md(src_iter_desc, src_iter_c_desc)
+                && xnor_md(dst_iter_desc, dst_iter_c_desc);
+        if (!args_ok) return invalid_arguments;
+    }
+
+    CHECK(check_runtime_dims_or_strides({src_layer_desc, src_iter_desc,
+            src_iter_c_desc, weights_layer_desc, weights_iter_desc,
+            weights_peephole_desc, weights_projection_desc, bias_desc,
+            dst_layer_desc, dst_iter_desc, dst_iter_c_desc}));
 
     // Create the descriptor
-    mkldnn_rnn_desc_t rd = zero_rnn_desc();
+    auto rd = rnn_desc_t();
 
     rd.primitive_kind = primitive_kind::rnn;
     rd.prop_kind = prop_kind;
-    rd.cell_desc = *rnn_cell_desc;
+    rd.cell_kind = cell_kind;
     rd.direction = direction;
-    rd.src_layer_desc = copy_maybe_null(src_layer_desc);
-    rd.src_iter_desc = copy_maybe_null(src_iter_desc);
-    rd.weights_layer_desc = copy_maybe_null(weights_layer_desc);
-    rd.weights_iter_desc = copy_maybe_null(weights_iter_desc);
-    rd.bias_desc = copy_maybe_null(bias_desc);
-    rd.dst_layer_desc = copy_maybe_null(dst_layer_desc);
-    rd.dst_iter_desc = copy_maybe_null(dst_iter_desc);
+    maybe_init_md(rd.src_layer_desc, src_layer_desc);
+    maybe_init_md(rd.src_iter_desc, src_iter_desc);
+    maybe_init_md(rd.src_iter_c_desc, src_iter_c_desc);
+    maybe_init_md(rd.weights_layer_desc, weights_layer_desc);
+    maybe_init_md(rd.weights_iter_desc, weights_iter_desc);
+    maybe_init_md(rd.weights_peephole_desc, weights_peephole_desc);
+    maybe_init_md(rd.weights_projection_desc, weights_projection_desc);
+    maybe_init_md(rd.bias_desc, bias_desc);
+    maybe_init_md(rd.dst_layer_desc, dst_layer_desc);
+    maybe_init_md(rd.dst_iter_desc, dst_iter_desc);
+    maybe_init_md(rd.dst_iter_c_desc, dst_iter_c_desc);
+
+    rd.flags = flags;
+    rd.activation_kind = activation;
+    rd.alpha = alpha;
+    rd.beta = beta;
+
+    CHECK(check_data_type_consistency_fwd(rd));
+    CHECK(check_dim_consistency(rd));
 
     *rnn_desc = rd;
 
     return success;
 }
 
-status_t MKLDNN_API mkldnn_rnn_backward_desc_init(mkldnn_rnn_desc_t *rnn_desc,
-        prop_kind_t prop_kind, const rnn_cell_desc_t *rnn_cell_desc,
-        const rnn_direction_t direction, const memory_desc_t *src_layer_desc,
-        const memory_desc_t *src_iter_desc,
-        const memory_desc_t *weights_layer_desc,
-        const memory_desc_t *weights_iter_desc, const memory_desc_t *bias_desc,
-        const memory_desc_t *dst_layer_desc, const memory_desc_t *dst_iter_desc,
-        const memory_desc_t *diff_src_layer_desc,
-        const memory_desc_t *diff_src_iter_desc,
-        const memory_desc_t *diff_weights_layer_desc,
-        const memory_desc_t *diff_weights_iter_desc,
-        const memory_desc_t *diff_bias_desc,
-        const memory_desc_t *diff_dst_layer_desc,
-        const memory_desc_t *diff_dst_iter_desc) {
-    bool args_ok = true
+status_t rnn_common_bwd_desc_init(dnnl_rnn_desc_t *rnn_desc,
+        dnnl_prop_kind_t prop_kind, dnnl_alg_kind_t cell_kind,
+        const dnnl_rnn_direction_t direction,
+        const dnnl_memory_desc_t *src_layer_desc,
+        const dnnl_memory_desc_t *src_iter_desc,
+        const dnnl_memory_desc_t *src_iter_c_desc,
+        const dnnl_memory_desc_t *weights_layer_desc,
+        const dnnl_memory_desc_t *weights_iter_desc,
+        const dnnl_memory_desc_t *weights_peephole_desc,
+        const dnnl_memory_desc_t *weights_projection_desc,
+        const dnnl_memory_desc_t *bias_desc,
+        const dnnl_memory_desc_t *dst_layer_desc,
+        const dnnl_memory_desc_t *dst_iter_desc,
+        const dnnl_memory_desc_t *dst_iter_c_desc,
+        const dnnl_memory_desc_t *diff_src_layer_desc,
+        const dnnl_memory_desc_t *diff_src_iter_desc,
+        const dnnl_memory_desc_t *diff_src_iter_c_desc,
+        const dnnl_memory_desc_t *diff_weights_layer_desc,
+        const dnnl_memory_desc_t *diff_weights_iter_desc,
+        const dnnl_memory_desc_t *diff_weights_peephole_desc,
+        const dnnl_memory_desc_t *diff_weights_projection_desc,
+        const dnnl_memory_desc_t *diff_bias_desc,
+        const dnnl_memory_desc_t *diff_dst_layer_desc,
+        const dnnl_memory_desc_t *diff_dst_iter_desc,
+        const dnnl_memory_desc_t *diff_dst_iter_c_desc, unsigned flags,
+        dnnl_alg_kind_t activation = dnnl_alg_kind_undef, float alpha = 0.0f,
+        float beta = 0.0f) {
+
+    // check that a supported cell kind has been passed
+    bool args_ok = one_of(cell_kind, dnnl_vanilla_rnn, dnnl_vanilla_lstm,
+            dnnl_vanilla_gru, dnnl_lbr_gru);
+    if (!args_ok) return invalid_arguments;
+
+    // check that all mandatory parameters are non-null
+    args_ok = args_ok
             && !any_null(src_layer_desc, weights_layer_desc, weights_iter_desc,
-                       dst_layer_desc, diff_src_layer_desc,
-                       diff_weights_layer_desc, diff_weights_iter_desc,
-                       diff_dst_layer_desc);
-    if (!args_ok)
-        return invalid_arguments;
+                    dst_layer_desc, diff_src_layer_desc,
+                    diff_weights_layer_desc, diff_weights_iter_desc,
+                    diff_dst_layer_desc);
+    if (!args_ok) return invalid_arguments;
 
-    auto xnor_md = [=](const memory_desc_t *a_md, const memory_desc_t *b_md) {
-        return is_zero_md(a_md) == is_zero_md(b_md);
-    };
+    if (cell_kind == dnnl_vanilla_rnn) {
+        using namespace alg_kind;
+        args_ok = args_ok
+                && one_of(activation, eltwise_relu, eltwise_tanh,
+                        eltwise_logistic);
+        if (!args_ok) return invalid_arguments;
+    }
 
+    if (cell_kind == dnnl_vanilla_lstm) {
+        // check if optional *_iter is provided then *_iter_c is provided too
+        args_ok = args_ok && xnor_md(src_iter_desc, src_iter_c_desc)
+                && xnor_md(dst_iter_desc, dst_iter_c_desc);
+        if (!args_ok) return invalid_arguments;
+    }
+
+    // check if optional md is provided then diff_md is provided too
     args_ok = args_ok && xnor_md(bias_desc, diff_bias_desc)
+            && xnor_md(weights_peephole_desc, diff_weights_peephole_desc)
+            && xnor_md(weights_projection_desc, diff_weights_projection_desc)
+            && xnor_md(src_iter_desc, diff_src_iter_desc)
+            && xnor_md(src_iter_c_desc, diff_src_iter_c_desc)
             && xnor_md(dst_iter_desc, diff_dst_iter_desc)
-            && xnor_md(src_iter_desc, diff_src_iter_desc);
-    if (!args_ok)
-        return invalid_arguments;
+            && xnor_md(dst_iter_c_desc, diff_dst_iter_c_desc);
+    if (!args_ok) return invalid_arguments;
 
-    //check dimensions consistency
-    int L = weights_layer_desc->dims[0];
-    int T = src_layer_desc->dims[0];
-    int N = src_layer_desc->dims[1];
-    const int D = one_of(direction, mkldnn_unidirectional_left2right,
-                          mkldnn_unidirectional_right2left) ?
-            1 :
-            2;
-    int G = mkldnn_rnn_cell_get_gates_count(rnn_cell_desc);
-    int S = mkldnn_rnn_cell_get_states_count(rnn_cell_desc);
-    int SLC = src_layer_desc->dims[2];
-    int SIC = weights_iter_desc->dims[2];
-    int DLC = dst_layer_desc->dims[2];
-    int DIC = weights_layer_desc->dims[4];
+    CHECK(check_runtime_dims_or_strides({src_layer_desc, src_iter_desc,
+            src_iter_c_desc, weights_layer_desc, weights_iter_desc,
+            weights_peephole_desc, weights_projection_desc, bias_desc,
+            dst_layer_desc, dst_iter_desc, dst_iter_c_desc, diff_src_layer_desc,
+            diff_src_iter_desc, diff_src_iter_c_desc, diff_weights_layer_desc,
+            diff_weights_iter_desc, diff_weights_peephole_desc,
+            diff_weights_projection_desc, diff_bias_desc, diff_dst_layer_desc,
+            diff_dst_iter_desc, diff_dst_iter_c_desc}));
 
-    status_t st = check_dim_consistency(rnn_cell_desc, direction, L, D, T, N, S,
-            G, SLC, SIC, DLC, DIC, src_layer_desc, src_iter_desc,
-            weights_layer_desc, weights_iter_desc, bias_desc, dst_layer_desc,
-            dst_iter_desc);
-    if (st != success) return st;
-
-    st = check_dim_consistency(rnn_cell_desc, direction, L, D, T, N, S,
-            G, SLC, SIC, DLC, DIC, diff_src_layer_desc, diff_src_iter_desc,
-            diff_weights_layer_desc, diff_weights_iter_desc, diff_bias_desc,
-            diff_dst_layer_desc, diff_dst_iter_desc);
-    if (st != success) return st;
-
-    mkldnn_rnn_desc_t rd = zero_rnn_desc();
+    auto rd = dnnl_rnn_desc_t();
 
     rd.primitive_kind = primitive_kind::rnn;
     rd.prop_kind = prop_kind;
-    rd.cell_desc = *rnn_cell_desc;
+    rd.cell_kind = cell_kind;
     rd.direction = direction;
 
-    rd.src_layer_desc = copy_maybe_null(src_layer_desc);
-    rd.src_iter_desc = copy_maybe_null(src_iter_desc);
-    rd.weights_layer_desc = copy_maybe_null(weights_layer_desc);
-    rd.weights_iter_desc = copy_maybe_null(weights_iter_desc);
-    rd.bias_desc = copy_maybe_null(bias_desc);
-    rd.dst_layer_desc = copy_maybe_null(dst_layer_desc);
-    rd.dst_iter_desc = copy_maybe_null(dst_iter_desc);
-    rd.diff_src_layer_desc = copy_maybe_null(diff_src_layer_desc);
-    rd.diff_src_iter_desc = copy_maybe_null(diff_src_iter_desc);
-    rd.diff_weights_layer_desc = copy_maybe_null(diff_weights_layer_desc);
-    rd.diff_weights_iter_desc = copy_maybe_null(diff_weights_iter_desc);
-    rd.diff_bias_desc = copy_maybe_null(diff_bias_desc);
-    rd.diff_dst_layer_desc = copy_maybe_null(diff_dst_layer_desc);
-    rd.diff_dst_iter_desc = copy_maybe_null(diff_dst_iter_desc);
+    maybe_init_md(rd.src_layer_desc, src_layer_desc);
+    maybe_init_md(rd.src_iter_desc, src_iter_desc);
+    maybe_init_md(rd.src_iter_c_desc, src_iter_c_desc);
+    maybe_init_md(rd.weights_layer_desc, weights_layer_desc);
+    maybe_init_md(rd.weights_iter_desc, weights_iter_desc);
+    maybe_init_md(rd.weights_peephole_desc, weights_peephole_desc);
+    maybe_init_md(rd.weights_projection_desc, weights_projection_desc);
+    maybe_init_md(rd.bias_desc, bias_desc);
+    maybe_init_md(rd.dst_layer_desc, dst_layer_desc);
+    maybe_init_md(rd.dst_iter_desc, dst_iter_desc);
+    maybe_init_md(rd.dst_iter_c_desc, dst_iter_c_desc);
+    maybe_init_md(rd.diff_src_layer_desc, diff_src_layer_desc);
+    maybe_init_md(rd.diff_src_iter_desc, diff_src_iter_desc);
+    maybe_init_md(rd.diff_src_iter_c_desc, diff_src_iter_c_desc);
+    maybe_init_md(rd.diff_weights_layer_desc, diff_weights_layer_desc);
+    maybe_init_md(rd.diff_weights_iter_desc, diff_weights_iter_desc);
+    maybe_init_md(rd.diff_weights_peephole_desc, diff_weights_peephole_desc);
+    maybe_init_md(
+            rd.diff_weights_projection_desc, diff_weights_projection_desc);
+    maybe_init_md(rd.diff_bias_desc, diff_bias_desc);
+    maybe_init_md(rd.diff_dst_layer_desc, diff_dst_layer_desc);
+    maybe_init_md(rd.diff_dst_iter_desc, diff_dst_iter_desc);
+    maybe_init_md(rd.diff_dst_iter_c_desc, diff_dst_iter_c_desc);
+
+    rd.flags = flags;
+    rd.activation_kind = activation;
+    rd.alpha = alpha;
+    rd.beta = beta;
+
+    CHECK(check_data_type_consistency_fwd(rd));
+    CHECK(check_data_type_consistency_bwd(rd));
+
+    CHECK(check_dim_consistency(rd));
 
     *rnn_desc = rd;
 
     return success;
+}
+
+} // namespace
+
+/* Public C Api */
+
+status_t dnnl_vanilla_rnn_forward_desc_init(dnnl_rnn_desc_t *rnn_desc,
+        dnnl_prop_kind_t prop_kind, const dnnl_alg_kind_t activation,
+        const dnnl_rnn_direction_t direction,
+        const dnnl_memory_desc_t *src_layer_desc,
+        const dnnl_memory_desc_t *src_iter_desc,
+        const dnnl_memory_desc_t *weights_layer_desc,
+        const dnnl_memory_desc_t *weights_iter_desc,
+        const dnnl_memory_desc_t *bias_desc,
+        const dnnl_memory_desc_t *dst_layer_desc,
+        const dnnl_memory_desc_t *dst_iter_desc, unsigned flags, float alpha,
+        float beta) {
+    status_t st = rnn_common_fwd_desc_init(rnn_desc, prop_kind,
+            dnnl_vanilla_rnn, direction, src_layer_desc, src_iter_desc, nullptr,
+            weights_layer_desc, weights_iter_desc, nullptr, nullptr, bias_desc,
+            dst_layer_desc, dst_iter_desc, nullptr, flags, activation, alpha,
+            beta);
+    return st;
+}
+
+status_t dnnl_lstm_forward_desc_init(dnnl_rnn_desc_t *rnn_desc,
+        dnnl_prop_kind_t prop_kind, dnnl_rnn_direction_t direction,
+        const dnnl_memory_desc_t *src_layer_desc,
+        const dnnl_memory_desc_t *src_iter_desc,
+        const dnnl_memory_desc_t *src_iter_c_desc,
+        const dnnl_memory_desc_t *weights_layer_desc,
+        const dnnl_memory_desc_t *weights_iter_desc,
+        const dnnl_memory_desc_t *bias_desc,
+        const dnnl_memory_desc_t *dst_layer_desc,
+        const dnnl_memory_desc_t *dst_iter_desc,
+        const dnnl_memory_desc_t *dst_iter_c_desc, unsigned flags) {
+    return dnnl_lstm_forward_desc_init_v3(rnn_desc, prop_kind, direction,
+            src_layer_desc, src_iter_desc, src_iter_c_desc, weights_layer_desc,
+            weights_iter_desc, nullptr, nullptr, bias_desc, dst_layer_desc,
+            dst_iter_desc, dst_iter_c_desc, flags);
+}
+
+status_t dnnl_lstm_forward_desc_init_v2(dnnl_rnn_desc_t *rnn_desc,
+        dnnl_prop_kind_t prop_kind, dnnl_rnn_direction_t direction,
+        const dnnl_memory_desc_t *src_layer_desc,
+        const dnnl_memory_desc_t *src_iter_desc,
+        const dnnl_memory_desc_t *src_iter_c_desc,
+        const dnnl_memory_desc_t *weights_layer_desc,
+        const dnnl_memory_desc_t *weights_iter_desc,
+        const dnnl_memory_desc_t *weights_peephole_desc,
+        const dnnl_memory_desc_t *bias_desc,
+        const dnnl_memory_desc_t *dst_layer_desc,
+        const dnnl_memory_desc_t *dst_iter_desc,
+        const dnnl_memory_desc_t *dst_iter_c_desc, unsigned flags) {
+    return dnnl_lstm_forward_desc_init_v3(rnn_desc, prop_kind, direction,
+            src_layer_desc, src_iter_desc, src_iter_c_desc, weights_layer_desc,
+            weights_iter_desc, weights_peephole_desc, nullptr, bias_desc,
+            dst_layer_desc, dst_iter_desc, dst_iter_c_desc, flags);
+}
+
+status_t dnnl_lstm_forward_desc_init_v3(dnnl_rnn_desc_t *rnn_desc,
+        dnnl_prop_kind_t prop_kind, dnnl_rnn_direction_t direction,
+        const dnnl_memory_desc_t *src_layer_desc,
+        const dnnl_memory_desc_t *src_iter_desc,
+        const dnnl_memory_desc_t *src_iter_c_desc,
+        const dnnl_memory_desc_t *weights_layer_desc,
+        const dnnl_memory_desc_t *weights_iter_desc,
+        const dnnl_memory_desc_t *weights_peephole_desc,
+        const dnnl_memory_desc_t *weights_projection_desc,
+        const dnnl_memory_desc_t *bias_desc,
+        const dnnl_memory_desc_t *dst_layer_desc,
+        const dnnl_memory_desc_t *dst_iter_desc,
+        const dnnl_memory_desc_t *dst_iter_c_desc, unsigned flags) {
+    status_t st = rnn_common_fwd_desc_init(rnn_desc, prop_kind,
+            dnnl_vanilla_lstm, direction, src_layer_desc, src_iter_desc,
+            src_iter_c_desc, weights_layer_desc, weights_iter_desc,
+            weights_peephole_desc, weights_projection_desc, bias_desc,
+            dst_layer_desc, dst_iter_desc, dst_iter_c_desc, flags);
+    return st;
+}
+
+status_t dnnl_gru_forward_desc_init(dnnl_rnn_desc_t *rnn_desc,
+        dnnl_prop_kind_t prop_kind, dnnl_rnn_direction_t direction,
+        const dnnl_memory_desc_t *src_layer_desc,
+        const dnnl_memory_desc_t *src_iter_desc,
+        const dnnl_memory_desc_t *weights_layer_desc,
+        const dnnl_memory_desc_t *weights_iter_desc,
+        const dnnl_memory_desc_t *bias_desc,
+        const dnnl_memory_desc_t *dst_layer_desc,
+        const dnnl_memory_desc_t *dst_iter_desc, unsigned flags) {
+    status_t st = rnn_common_fwd_desc_init(rnn_desc, prop_kind,
+            dnnl_vanilla_gru, direction, src_layer_desc, src_iter_desc, nullptr,
+            weights_layer_desc, weights_iter_desc, nullptr, nullptr, bias_desc,
+            dst_layer_desc, dst_iter_desc, nullptr, flags);
+    return st;
+}
+
+status_t dnnl_lbr_gru_forward_desc_init(dnnl_rnn_desc_t *rnn_desc,
+        dnnl_prop_kind_t prop_kind, dnnl_rnn_direction_t direction,
+        const dnnl_memory_desc_t *src_layer_desc,
+        const dnnl_memory_desc_t *src_iter_desc,
+        const dnnl_memory_desc_t *weights_layer_desc,
+        const dnnl_memory_desc_t *weights_iter_desc,
+        const dnnl_memory_desc_t *bias_desc,
+        const dnnl_memory_desc_t *dst_layer_desc,
+        const dnnl_memory_desc_t *dst_iter_desc, unsigned flags) {
+    status_t st = rnn_common_fwd_desc_init(rnn_desc, prop_kind, dnnl_lbr_gru,
+            direction, src_layer_desc, src_iter_desc, nullptr,
+            weights_layer_desc, weights_iter_desc, nullptr, nullptr, bias_desc,
+            dst_layer_desc, dst_iter_desc, nullptr, flags);
+    return st;
+}
+
+status_t dnnl_vanilla_rnn_backward_desc_init(dnnl_rnn_desc_t *rnn_desc,
+        dnnl_prop_kind_t prop_kind, const dnnl_alg_kind_t activation,
+        const dnnl_rnn_direction_t direction,
+        const dnnl_memory_desc_t *src_layer_desc,
+        const dnnl_memory_desc_t *src_iter_desc,
+        const dnnl_memory_desc_t *weights_layer_desc,
+        const dnnl_memory_desc_t *weights_iter_desc,
+        const dnnl_memory_desc_t *bias_desc,
+        const dnnl_memory_desc_t *dst_layer_desc,
+        const dnnl_memory_desc_t *dst_iter_desc,
+        const dnnl_memory_desc_t *diff_src_layer_desc,
+        const dnnl_memory_desc_t *diff_src_iter_desc,
+        const dnnl_memory_desc_t *diff_weights_layer_desc,
+        const dnnl_memory_desc_t *diff_weights_iter_desc,
+        const dnnl_memory_desc_t *diff_bias_desc,
+        const dnnl_memory_desc_t *diff_dst_layer_desc,
+        const dnnl_memory_desc_t *diff_dst_iter_desc, unsigned flags,
+        float alpha, float beta) {
+    status_t st = rnn_common_bwd_desc_init(rnn_desc, prop_kind,
+            dnnl_vanilla_rnn, direction, src_layer_desc, src_iter_desc, nullptr,
+            weights_layer_desc, weights_iter_desc, nullptr, nullptr, bias_desc,
+            dst_layer_desc, dst_iter_desc, nullptr, diff_src_layer_desc,
+            diff_src_iter_desc, nullptr, diff_weights_layer_desc,
+            diff_weights_iter_desc, nullptr, nullptr, diff_bias_desc,
+            diff_dst_layer_desc, diff_dst_iter_desc, nullptr, flags, activation,
+            alpha, beta);
+    return st;
+}
+
+status_t dnnl_lstm_backward_desc_init(dnnl_rnn_desc_t *rnn_desc,
+        dnnl_prop_kind_t prop_kind, dnnl_rnn_direction_t direction,
+        const dnnl_memory_desc_t *src_layer_desc,
+        const dnnl_memory_desc_t *src_iter_desc,
+        const dnnl_memory_desc_t *src_iter_c_desc,
+        const dnnl_memory_desc_t *weights_layer_desc,
+        const dnnl_memory_desc_t *weights_iter_desc,
+        const dnnl_memory_desc_t *bias_desc,
+        const dnnl_memory_desc_t *dst_layer_desc,
+        const dnnl_memory_desc_t *dst_iter_desc,
+        const dnnl_memory_desc_t *dst_iter_c_desc,
+        const dnnl_memory_desc_t *diff_src_layer_desc,
+        const dnnl_memory_desc_t *diff_src_iter_desc,
+        const dnnl_memory_desc_t *diff_src_iter_c_desc,
+        const dnnl_memory_desc_t *diff_weights_layer_desc,
+        const dnnl_memory_desc_t *diff_weights_iter_desc,
+        const dnnl_memory_desc_t *diff_bias_desc,
+        const dnnl_memory_desc_t *diff_dst_layer_desc,
+        const dnnl_memory_desc_t *diff_dst_iter_desc,
+        const dnnl_memory_desc_t *diff_dst_iter_c_desc, unsigned flags) {
+    return dnnl_lstm_backward_desc_init_v3(rnn_desc, prop_kind, direction,
+            src_layer_desc, src_iter_desc, src_iter_c_desc, weights_layer_desc,
+            weights_iter_desc, nullptr, nullptr, bias_desc, dst_layer_desc,
+            dst_iter_desc, dst_iter_c_desc, diff_src_layer_desc,
+            diff_src_iter_desc, diff_src_iter_c_desc, diff_weights_layer_desc,
+            diff_weights_iter_desc, nullptr, nullptr, diff_bias_desc,
+            diff_dst_layer_desc, diff_dst_iter_desc, diff_dst_iter_c_desc,
+            flags);
+}
+
+status_t dnnl_lstm_backward_desc_init_v2(dnnl_rnn_desc_t *rnn_desc,
+        dnnl_prop_kind_t prop_kind, dnnl_rnn_direction_t direction,
+        const dnnl_memory_desc_t *src_layer_desc,
+        const dnnl_memory_desc_t *src_iter_desc,
+        const dnnl_memory_desc_t *src_iter_c_desc,
+        const dnnl_memory_desc_t *weights_layer_desc,
+        const dnnl_memory_desc_t *weights_iter_desc,
+        const dnnl_memory_desc_t *weights_peephole_desc,
+        const dnnl_memory_desc_t *bias_desc,
+        const dnnl_memory_desc_t *dst_layer_desc,
+        const dnnl_memory_desc_t *dst_iter_desc,
+        const dnnl_memory_desc_t *dst_iter_c_desc,
+        const dnnl_memory_desc_t *diff_src_layer_desc,
+        const dnnl_memory_desc_t *diff_src_iter_desc,
+        const dnnl_memory_desc_t *diff_src_iter_c_desc,
+        const dnnl_memory_desc_t *diff_weights_layer_desc,
+        const dnnl_memory_desc_t *diff_weights_iter_desc,
+        const dnnl_memory_desc_t *diff_weights_peephole_desc,
+        const dnnl_memory_desc_t *diff_bias_desc,
+        const dnnl_memory_desc_t *diff_dst_layer_desc,
+        const dnnl_memory_desc_t *diff_dst_iter_desc,
+        const dnnl_memory_desc_t *diff_dst_iter_c_desc, unsigned flags) {
+    return dnnl_lstm_backward_desc_init_v3(rnn_desc, prop_kind, direction,
+            src_layer_desc, src_iter_desc, src_iter_c_desc, weights_layer_desc,
+            weights_iter_desc, weights_peephole_desc, nullptr, bias_desc,
+            dst_layer_desc, dst_iter_desc, dst_iter_c_desc, diff_src_layer_desc,
+            diff_src_iter_desc, diff_src_iter_c_desc, diff_weights_layer_desc,
+            diff_weights_iter_desc, diff_weights_peephole_desc, nullptr,
+            diff_bias_desc, diff_dst_layer_desc, diff_dst_iter_desc,
+            diff_dst_iter_c_desc, flags);
+}
+
+status_t dnnl_lstm_backward_desc_init_v3(dnnl_rnn_desc_t *rnn_desc,
+        dnnl_prop_kind_t prop_kind, dnnl_rnn_direction_t direction,
+        const dnnl_memory_desc_t *src_layer_desc,
+        const dnnl_memory_desc_t *src_iter_desc,
+        const dnnl_memory_desc_t *src_iter_c_desc,
+        const dnnl_memory_desc_t *weights_layer_desc,
+        const dnnl_memory_desc_t *weights_iter_desc,
+        const dnnl_memory_desc_t *weights_peephole_desc,
+        const dnnl_memory_desc_t *weights_projection_desc,
+        const dnnl_memory_desc_t *bias_desc,
+        const dnnl_memory_desc_t *dst_layer_desc,
+        const dnnl_memory_desc_t *dst_iter_desc,
+        const dnnl_memory_desc_t *dst_iter_c_desc,
+        const dnnl_memory_desc_t *diff_src_layer_desc,
+        const dnnl_memory_desc_t *diff_src_iter_desc,
+        const dnnl_memory_desc_t *diff_src_iter_c_desc,
+        const dnnl_memory_desc_t *diff_weights_layer_desc,
+        const dnnl_memory_desc_t *diff_weights_iter_desc,
+        const dnnl_memory_desc_t *diff_weights_peephole_desc,
+        const dnnl_memory_desc_t *diff_weights_projection_desc,
+        const dnnl_memory_desc_t *diff_bias_desc,
+        const dnnl_memory_desc_t *diff_dst_layer_desc,
+        const dnnl_memory_desc_t *diff_dst_iter_desc,
+        const dnnl_memory_desc_t *diff_dst_iter_c_desc, unsigned flags) {
+    status_t st = rnn_common_bwd_desc_init(rnn_desc, prop_kind,
+            dnnl_vanilla_lstm, direction, src_layer_desc, src_iter_desc,
+            src_iter_c_desc, weights_layer_desc, weights_iter_desc,
+            weights_peephole_desc, weights_projection_desc, bias_desc,
+            dst_layer_desc, dst_iter_desc, dst_iter_c_desc, diff_src_layer_desc,
+            diff_src_iter_desc, diff_src_iter_c_desc, diff_weights_layer_desc,
+            diff_weights_iter_desc, diff_weights_peephole_desc,
+            diff_weights_projection_desc, diff_bias_desc, diff_dst_layer_desc,
+            diff_dst_iter_desc, diff_dst_iter_c_desc, flags);
+    return st;
+}
+
+status_t dnnl_gru_backward_desc_init(dnnl_rnn_desc_t *rnn_desc,
+        dnnl_prop_kind_t prop_kind, dnnl_rnn_direction_t direction,
+        const dnnl_memory_desc_t *src_layer_desc,
+        const dnnl_memory_desc_t *src_iter_desc,
+        const dnnl_memory_desc_t *weights_layer_desc,
+        const dnnl_memory_desc_t *weights_iter_desc,
+        const dnnl_memory_desc_t *bias_desc,
+        const dnnl_memory_desc_t *dst_layer_desc,
+        const dnnl_memory_desc_t *dst_iter_desc,
+        const dnnl_memory_desc_t *diff_src_layer_desc,
+        const dnnl_memory_desc_t *diff_src_iter_desc,
+        const dnnl_memory_desc_t *diff_weights_layer_desc,
+        const dnnl_memory_desc_t *diff_weights_iter_desc,
+        const dnnl_memory_desc_t *diff_bias_desc,
+        const dnnl_memory_desc_t *diff_dst_layer_desc,
+        const dnnl_memory_desc_t *diff_dst_iter_desc, unsigned flags) {
+    status_t st = rnn_common_bwd_desc_init(rnn_desc, prop_kind,
+            dnnl_vanilla_gru, direction, src_layer_desc, src_iter_desc, nullptr,
+            weights_layer_desc, weights_iter_desc, nullptr, nullptr, bias_desc,
+            dst_layer_desc, dst_iter_desc, nullptr, diff_src_layer_desc,
+            diff_src_iter_desc, nullptr, diff_weights_layer_desc,
+            diff_weights_iter_desc, nullptr, nullptr, diff_bias_desc,
+            diff_dst_layer_desc, diff_dst_iter_desc, nullptr, flags);
+    return st;
+}
+
+status_t dnnl_lbr_gru_backward_desc_init(dnnl_rnn_desc_t *rnn_desc,
+        dnnl_prop_kind_t prop_kind, dnnl_rnn_direction_t direction,
+        const dnnl_memory_desc_t *src_layer_desc,
+        const dnnl_memory_desc_t *src_iter_desc,
+        const dnnl_memory_desc_t *weights_layer_desc,
+        const dnnl_memory_desc_t *weights_iter_desc,
+        const dnnl_memory_desc_t *bias_desc,
+        const dnnl_memory_desc_t *dst_layer_desc,
+        const dnnl_memory_desc_t *dst_iter_desc,
+        const dnnl_memory_desc_t *diff_src_layer_desc,
+        const dnnl_memory_desc_t *diff_src_iter_desc,
+        const dnnl_memory_desc_t *diff_weights_layer_desc,
+        const dnnl_memory_desc_t *diff_weights_iter_desc,
+        const dnnl_memory_desc_t *diff_bias_desc,
+        const dnnl_memory_desc_t *diff_dst_layer_desc,
+        const dnnl_memory_desc_t *diff_dst_iter_desc, unsigned flags) {
+    status_t st = rnn_common_bwd_desc_init(rnn_desc, prop_kind, dnnl_lbr_gru,
+            direction, src_layer_desc, src_iter_desc, nullptr,
+            weights_layer_desc, weights_iter_desc, nullptr, nullptr, bias_desc,
+            dst_layer_desc, dst_iter_desc, nullptr, diff_src_layer_desc,
+            diff_src_iter_desc, nullptr, diff_weights_layer_desc,
+            diff_weights_iter_desc, nullptr, nullptr, diff_bias_desc,
+            diff_dst_layer_desc, diff_dst_iter_desc, nullptr, flags);
+    return st;
 }

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2016-2018 Intel Corporation
+* Copyright 2016-2020 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -14,161 +14,295 @@
 * limitations under the License.
 *******************************************************************************/
 
-#ifndef PRIMITIVE_DESC_HPP
-#define PRIMITIVE_DESC_HPP
+#ifndef COMMON_PRIMITIVE_DESC_HPP
+#define COMMON_PRIMITIVE_DESC_HPP
 
-#include "mkldnn.h"
+#include <typeindex>
+
+#include "dnnl.h"
 
 #include "c_types_map.hpp"
+#include "dnnl_thread.hpp"
 #include "memory_tracking.hpp"
 #include "nstl.hpp"
-#include "type_helpers.hpp"
 #include "primitive_attr.hpp"
+#include "primitive_cache.hpp"
+#include "type_helpers.hpp"
 #include "verbose.hpp"
 
-struct mkldnn_primitive_desc: public mkldnn::impl::c_compatible {
-    using md_t = mkldnn::impl::memory_desc_t;
+namespace dnnl {
+namespace impl {
 
-    mkldnn_primitive_desc(mkldnn::impl::engine_t *engine,
-            const mkldnn::impl::primitive_attr_t *attr,
-            mkldnn::impl::primitive_kind_t kind)
-        : engine_(engine), attr_(*attr), kind_(kind) { info_[0] = '\0'; }
+struct primitive_t;
+// Primitive descriptor implementation
+struct primitive_desc_t : public c_compatible {
+    primitive_desc_t(const primitive_attr_t *attr, primitive_kind_t kind)
+        : attr_(*attr), kind_(kind) {
+        is_initialized_ = is_initialized_ && attr_.is_initialized();
+    }
 
-    mkldnn_primitive_desc(mkldnn::impl::engine_t *engine,
-            mkldnn::impl::primitive_kind_t kind)
-        : engine_(engine), kind_(kind) { info_[0] = '\0'; }
+    primitive_desc_t(primitive_kind_t kind) : kind_(kind) {}
 
-    virtual mkldnn_primitive_desc *clone() const = 0;
-    virtual ~mkldnn_primitive_desc() {}
+    bool is_initialized() const { return is_initialized_; }
 
-    const mkldnn::impl::primitive_attr_t *attr() const { return &attr_; }
-    mkldnn::impl::engine_t *engine() const { return engine_; }
-    mkldnn::impl::primitive_kind_t kind() const { return kind_; }
+    virtual ~primitive_desc_t() = default;
+    virtual primitive_desc_t *clone() const = 0;
 
-    virtual void init_info() {}
-    const char *info() const { return info_; }
+    const primitive_attr_t *attr() const { return &attr_; }
+    primitive_kind_t kind() const { return kind_; }
 
-    mkldnn::impl::memory_tracking::registry_t &scratchpad_registry()
-    { return scratchpad_registry_; }
-    const mkldnn::impl::memory_tracking::registry_t &scratchpad_registry() const
-    { return scratchpad_registry_; }
-    virtual mkldnn::impl::engine_t *scratchpad_engine() const
-    { return engine_; }
+    const char *info(engine_t *engine) const {
+        if (!info_.is_initialized()) info_.init(engine, this);
+        return info_.c_str();
+    }
 
-    virtual const mkldnn::impl::op_desc_t *op_desc() const { return nullptr; }
+    memory_tracking::registry_t &scratchpad_registry() {
+        return scratchpad_registry_;
+    }
+    const memory_tracking::registry_t &scratchpad_registry() const {
+        return scratchpad_registry_;
+    }
+
+    virtual const op_desc_t *op_desc() const { return nullptr; }
 
     enum class arg_usage_t { unused, input, output };
-    virtual arg_usage_t arg_usage(
-            mkldnn::impl::primitive_arg_index_t arg) const {
-        using mkldnn::impl::types::is_zero_md;
-        if (arg == MKLDNN_ARG_SCRATCHPAD && !is_zero_md(scratchpad_md()))
+    virtual arg_usage_t arg_usage(int arg) const {
+        using types::is_zero_md;
+        if (arg == DNNL_ARG_ATTR_OUTPUT_SCALES
+                && !attr()->output_scales_.defined())
+            return arg_usage_t::input;
+        if ((arg & DNNL_ARG_ATTR_ZERO_POINTS)
+                && !attr()->zero_points_.defined(arg))
+            return arg_usage_t::input;
+        if (arg == DNNL_ARG_SCRATCHPAD && !is_zero_md(scratchpad_md()))
             return arg_usage_t::output;
         return arg_usage_t::unused;
     }
 
-#   define DECLARE_MD_STUB(stub) \
-    virtual const mkldnn::impl::memory_desc_t *stub(int idx = 0) const \
-    { return nullptr; }
-
-    DECLARE_MD_STUB(input_md); DECLARE_MD_STUB(output_md);
-    DECLARE_MD_STUB(src_md); DECLARE_MD_STUB(diff_src_md);
-    DECLARE_MD_STUB(dst_md); DECLARE_MD_STUB(diff_dst_md);
-    DECLARE_MD_STUB(weights_md); DECLARE_MD_STUB(diff_weights_md);
-    DECLARE_MD_STUB(workspace_md);
-#   undef DECLARE_MD_STUB
-
-    const mkldnn::impl::memory_desc_t *scratchpad_md(int idx = 0) const {
-        return idx == 0 ? &scratchpad_md_ : nullptr;
+    virtual const memory_desc_t *arg_md(int arg) const {
+        switch (arg) {
+            case DNNL_ARG_WORKSPACE: return workspace_md(0);
+            case DNNL_ARG_SCRATCHPAD: return scratchpad_md(0);
+            default: return &glob_zero_md;
+        }
     }
 
-    virtual void init_scratchpad_md() {
-        auto size = scratchpad_size(mkldnn::impl::scratchpad_mode::user);
-        mkldnn::impl::dims_t dims = { size };
-        mkldnn_memory_desc_init_by_tag(&scratchpad_md_, size ? 1 : 0, dims,
-                mkldnn::impl::data_type::u8, mkldnn_x);
+#define DECLARE_MD_STUB(stub) \
+    virtual const memory_desc_t *stub(int idx = 0) const { \
+        return &glob_zero_md; \
+    }
+
+    DECLARE_MD_STUB(input_md);
+    DECLARE_MD_STUB(output_md);
+    DECLARE_MD_STUB(src_md);
+    DECLARE_MD_STUB(diff_src_md);
+    DECLARE_MD_STUB(dst_md);
+    DECLARE_MD_STUB(diff_dst_md);
+    DECLARE_MD_STUB(weights_md);
+    DECLARE_MD_STUB(diff_weights_md);
+    DECLARE_MD_STUB(workspace_md);
+#undef DECLARE_MD_STUB
+
+    const memory_desc_t *scratchpad_md(int idx = 0) const {
+        return idx == 0 ? &scratchpad_md_ : &glob_zero_md;
+    }
+
+    void init_scratchpad_md() {
+        auto size = scratchpad_size(scratchpad_mode::user);
+        dims_t dims = {size};
+        dnnl_memory_desc_init_by_tag(
+                &scratchpad_md_, size ? 1 : 0, dims, data_type::u8, dnnl_x);
+    }
+
+    virtual std::type_index impl_id() const {
+        assert(!"primitive_desc_t doesn't have impl_id");
+        return typeid(primitive_desc_t);
     }
 
     /** returns the scratchpad size for the given scratchpad mode. */
-    mkldnn::impl::dim_t scratchpad_size(
-            mkldnn::impl::scratchpad_mode_t mode) const {
+    dim_t scratchpad_size(scratchpad_mode_t mode) const {
         if (mode != attr_.scratchpad_mode_) return 0;
         return scratchpad_registry().size();
+    }
+
+    virtual status_t query(query_t what, int idx, void *result) const {
+        auto safe_ret_md = [&](const memory_desc_t *_) {
+            if (_ == nullptr) return status::not_required;
+            *(const memory_desc_t **)result = _;
+            return status::success;
+        };
+
+        switch (what) {
+            case query::primitive_kind:
+                *(primitive_kind_t *)result = kind();
+                break;
+
+            case query::memory_consumption_s64:
+                *(dim_t *)result = scratchpad_size(scratchpad_mode::library);
+                break;
+
+            case query::op_d:
+                if (idx != 0 || op_desc() == nullptr)
+                    return status::invalid_arguments;
+                *(const_c_op_desc_t *)result
+                        = static_cast<const_c_op_desc_t>(op_desc());
+                break;
+
+            case query::exec_arg_md: return safe_ret_md(arg_md(idx));
+            case query::src_md: return safe_ret_md(src_md(idx));
+            case query::diff_src_md: return safe_ret_md(diff_src_md(idx));
+            case query::dst_md: return safe_ret_md(dst_md(idx));
+            case query::diff_dst_md: return safe_ret_md(diff_dst_md(idx));
+            case query::weights_md: return safe_ret_md(weights_md(idx));
+            case query::diff_weights_md:
+                return safe_ret_md(diff_weights_md(idx));
+            case query::workspace_md:
+                if (idx != 0) return status::invalid_arguments;
+                return safe_ret_md(workspace_md(idx));
+            case query::scratchpad_md:
+                if (idx != 0) return status::invalid_arguments;
+                return safe_ret_md(scratchpad_md(idx));
+
+            case query::num_of_inputs_s32: *(int *)result = n_inputs(); break;
+            case query::num_of_outputs_s32: *(int *)result = n_outputs(); break;
+
+            case query::impl_info_str: *(const char **)result = name(); break;
+
+            default: return status::unimplemented;
+        }
+        return status::success;
     }
 
     virtual int n_inputs() const { return 0; }
     virtual int n_outputs() const { return 0; }
 
-    virtual mkldnn::impl::status_t query(mkldnn::impl::query_t what, int idx,
-            void *result) const;
+    virtual status_t create_primitive(std::shared_ptr<primitive_t> &primitive,
+            engine_t *engine, bool is_primitive_nested = true) const = 0;
 
-    virtual mkldnn::impl::status_t create_primitive(
-            mkldnn::impl::primitive_t **primitive) const = 0;
-
-    virtual const char *name() const { return "mkldnn_primitive_desc"; }
+    virtual const char *name() const = 0;
 
     /* static magic */
 
-    template<typename pd_t>
-    static mkldnn::impl::status_t create(mkldnn::impl::primitive_desc_t **pd,
-            const mkldnn::impl::op_desc_t *adesc,
-            const mkldnn::impl::primitive_attr_t *attr,
-            mkldnn::impl::engine_t *engine,
-            const mkldnn::impl::primitive_desc_t *hint_fwd) {
-        using namespace mkldnn::impl;
-        using namespace mkldnn::impl::status;
+    template <typename pd_t>
+    static status_t create(primitive_desc_t **pd, const op_desc_t *adesc,
+            const primitive_attr_t *attr, engine_t *engine,
+            const primitive_desc_t *hint_fwd) {
+        using namespace dnnl::impl::status;
         using pd_op_desc_t = typename pkind_traits<pd_t::base_pkind>::desc_type;
-        if (adesc->kind != pd_t::base_pkind) return invalid_arguments;
+        // A hack to reuse softmax code using logsoftmax primitive.
+        // TODO: consider removing it in v2.0 by introducing alg_kind in softmax
+        bool valid_logsoftmax = pd_t::base_pkind == primitive_kind::softmax
+                && adesc->kind == primitive_kind::logsoftmax;
+        if (adesc->kind != pd_t::base_pkind && !valid_logsoftmax)
+            return invalid_arguments;
         assert(hint_fwd ? hint_fwd->kind() == pd_t::base_pkind : true);
-        auto hint =
-            reinterpret_cast<const typename pd_t::hint_class *>(hint_fwd);
-        auto _pd = new pd_t(engine, (const pd_op_desc_t *)adesc, attr, hint);
+        auto hint
+                = reinterpret_cast<const typename pd_t::hint_class *>(hint_fwd);
+        auto _pd = new pd_t((const pd_op_desc_t *)adesc, attr, hint);
         if (_pd == nullptr) return out_of_memory;
-        if (_pd->init() != success) { delete _pd; return unimplemented; }
-        _pd->init_info();
+        if (!_pd->is_initialized()) {
+            delete _pd;
+            return out_of_memory;
+        }
+        if (_pd->init(engine) != success) {
+            delete _pd;
+            return unimplemented;
+        }
+
         _pd->init_scratchpad_md();
         *pd = _pd;
         return success;
     }
 
 protected:
-    mkldnn::impl::engine_t *engine_;
-    mkldnn::impl::primitive_attr_t attr_;
-    mkldnn::impl::primitive_kind_t kind_;
+    primitive_attr_t attr_;
+    primitive_kind_t kind_;
 
-    mkldnn::impl::memory_desc_t scratchpad_md_;
+    memory_desc_t scratchpad_md_;
 
-    char info_[MKLDNN_VERBOSE_BUF_LEN];
+    mutable pd_info_t info_;
 
-    mkldnn::impl::memory_tracking::registry_t scratchpad_registry_;
+    memory_tracking::registry_t scratchpad_registry_;
 
 protected:
     /** compares ws between fwd_pd and this (make sense to use for bwd_pd)
      * Expectation: this already set workspace, and this workspace should
      *              exactly match the one from fwd_pd */
-    bool compare_ws(const mkldnn_primitive_desc *fwd_pd) const {
-        using namespace mkldnn::impl;
+    bool compare_ws(const primitive_desc_t *fwd_pd) const {
         if (!workspace_md()) return true; // the impl lives fine w/o workspace
         return fwd_pd && fwd_pd->workspace_md()
-            && *fwd_pd->workspace_md() == *workspace_md();
+                && *fwd_pd->workspace_md() == *workspace_md();
     }
+
+    primitive_desc_t &operator=(const primitive_desc_t &other) = delete;
 };
 
-#define DECLARE_COMMON_PD_t(impl_name, ...) \
-    virtual pd_t *clone() const override { return new pd_t(*this); } \
-    virtual status_t create_primitive(primitive_t **p) const override { \
-        double ms = get_msec(); \
-        auto ret = safe_ptr_assign<primitive_t>(*p, new (__VA_ARGS__)(this)); \
-        ms = get_msec() - ms; \
-        if (mkldnn_verbose()->level >= 2) { \
-            printf("mkldnn_verbose,create,%s,%g\n", this->info(), ms); \
-            fflush(0); \
-        } \
-        return ret; \
+} // namespace impl
+} // namespace dnnl
+
+// dnnl_primitive_desc is a user facing entity that has an alias
+// primitive_desc_iface_t for internal use.
+// The primitive_desc_iface_t is responsible for holding:
+// 1. impl::primitive_desc_t - a primitive descriptor implementation that
+// can be stored in the primitive cache as part of the primitive implementation
+// to which it belongs
+// 2. engine_t - a dnnl engine
+struct dnnl_primitive_desc : public dnnl::impl::c_compatible {
+    // This ctor is used to create a standalone pd
+    dnnl_primitive_desc(
+            dnnl::impl::primitive_desc_t *pd, dnnl::impl::engine_t *engine);
+
+    // This ctor is used to create pd inside primitive_iface_t
+    dnnl_primitive_desc(const std::shared_ptr<dnnl::impl::primitive_desc_t> &pd,
+            dnnl::impl::engine_t *engine);
+
+    virtual ~dnnl_primitive_desc() = default;
+
+    const char *info() const;
+    dnnl::impl::engine_t *engine() const;
+    const dnnl::impl::primitive_attr_t *attr() const;
+    virtual dnnl::impl::engine_t *scratchpad_engine() const;
+
+    virtual dnnl::impl::engine_t *src_engine() const;
+    virtual dnnl::impl::engine_t *dst_engine() const;
+
+    virtual dnnl::impl::status_t query(
+            dnnl::impl::query_t what, int idx, void *result) const;
+
+    dnnl::impl::status_t create_primitive_iface(
+            primitive_iface_t **primitive_iface) const;
+
+    const std::shared_ptr<dnnl::impl::primitive_desc_t> &impl() const;
+
+protected:
+    std::shared_ptr<dnnl::impl::primitive_desc_t> pd_;
+    dnnl::impl::engine_t *engine_;
+};
+
+#define DECLARE_COMMON_PD_t(impl_name, impl_type, use_global_scratchpad) \
+    pd_t *clone() const override { \
+        auto new_pd = utils::make_unique<pd_t>(*this); \
+        if (!new_pd->is_initialized()) return nullptr; \
+        return new_pd.release(); \
     } \
-    virtual const char *name() const override { return impl_name; }
-#define DECLARE_COMMON_PD_T(impl_name, ...) \
-    DECLARE_COMMON_PD_t(impl_name, __VA_ARGS__)
+    status_t create_primitive(std::shared_ptr<primitive_t> &primitive, \
+            engine_t *engine, bool is_primitive_nested) const override { \
+        return primitive_t::create_primitive_common<impl_type, pd_t>( \
+                primitive, this, engine, use_global_scratchpad, \
+                is_primitive_nested); \
+    } \
+    const char *name() const override { return impl_name; } \
+    std::type_index impl_id() const override { return typeid(pd_t); }
+
+#define DECLARE_COMMON_PD_T_USE_GLOBAL_SCRATCHPAD(impl_name, impl_type) \
+    DECLARE_COMMON_PD_t(impl_name, impl_type, true)
+
+#define DECLARE_COMMON_PD_T_(impl_name, impl_type) \
+    DECLARE_COMMON_PD_t(impl_name, impl_type, false)
+
+#define DECLARE_COMMON_PD_T(impl_name, impl_type, ...) \
+    DECLARE_COMMON_PD_T_##__VA_ARGS__(impl_name, impl_type)
 
 #endif
 
-// vim: et ts=4 sw=4 cindent cino^=l0,\:0,N-s
+// vim: et ts=4 sw=4 cindent cino+=l0,\:4,N-s

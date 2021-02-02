@@ -1,18 +1,5 @@
-// ======================================================================== //
-// Copyright 2009-2019 Intel Corporation                                    //
-//                                                                          //
-// Licensed under the Apache License, Version 2.0 (the "License");          //
-// you may not use this file except in compliance with the License.         //
-// You may obtain a copy of the License at                                  //
-//                                                                          //
-//     http://www.apache.org/licenses/LICENSE-2.0                           //
-//                                                                          //
-// Unless required by applicable law or agreed to in writing, software      //
-// distributed under the License is distributed on an "AS IS" BASIS,        //
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. //
-// See the License for the specific language governing permissions and      //
-// limitations under the License.                                           //
-// ======================================================================== //
+// Copyright 2009-2020 Intel Corporation
+// SPDX-License-Identifier: Apache-2.0
 
 #pragma once
 
@@ -35,7 +22,7 @@ namespace oidn {
 
     Image() : ptr(nullptr), width(0), height(0), bytePixelStride(0), rowStride(0), format(Format::Undefined) {}
 
-    Image(void* ptr, Format format, int width, int height, size_t byteOffset, size_t inBytePixelStride, size_t inByteRowStride)
+    Image(void* ptr, Format format, size_t width, size_t height, size_t byteOffset, size_t inBytePixelStride, size_t inByteRowStride)
     {
       if (ptr == nullptr)
         throw Exception(Error::InvalidArgument, "buffer pointer null");
@@ -43,7 +30,8 @@ namespace oidn {
       init((char*)ptr + byteOffset, format, width, height, inBytePixelStride, inByteRowStride);
     }
 
-    Image(const Ref<Buffer>& buffer, Format format, int width, int height, size_t byteOffset, size_t inBytePixelStride, size_t inByteRowStride)
+    Image(const Ref<Buffer>& buffer, Format format, size_t width, size_t height, size_t byteOffset, size_t inBytePixelStride, size_t inByteRowStride)
+      : buffer(buffer)
     {
       init(buffer->data() + byteOffset, format, width, height, inBytePixelStride, inByteRowStride);
 
@@ -51,18 +39,22 @@ namespace oidn {
         throw Exception(Error::InvalidArgument, "buffer region out of range");
     }
 
-    void init(char* ptr, Format format, int width, int height, size_t inBytePixelStride, size_t inByteRowStride)
+    Image(const Ref<Device>& device, Format format, size_t width, size_t height)
+      : buffer(makeRef<Buffer>(device, width * height * getFormatSize(format)))
     {
-      assert(width >= 0);
-      assert(height >= 0);
+      init(buffer->data(), format, width, height);
+    }
+
+    void init(char* ptr, Format format, size_t width, size_t height, size_t inBytePixelStride = 0, size_t inByteRowStride = 0)
+    {
       if (width > maxSize || height > maxSize)
         throw Exception(Error::InvalidArgument, "image size too large");
 
       this->ptr = ptr;
-      this->width = width;
-      this->height = height;
+      this->width  = int(width);
+      this->height = int(height);
 
-      const size_t pixelSize = getFormatBytes(format);
+      const size_t pixelSize = getFormatSize(format);
       if (inBytePixelStride != 0)
       {
         if (inBytePixelStride < pixelSize)
@@ -92,20 +84,54 @@ namespace oidn {
       this->format = format;
     }
 
-    __forceinline char* get(int y, int x)
+    __forceinline char* get(int h, int w)
     {
-      return ptr + ((size_t(y) * rowStride + size_t(x)) * bytePixelStride);
+      return ptr + ((size_t(h) * rowStride + size_t(w)) * bytePixelStride);
     }
 
-    __forceinline const char* get(int y, int x) const
+    __forceinline const char* get(int h, int w) const
     {
-      return ptr + ((size_t(y) * rowStride + size_t(x)) * bytePixelStride);
+      return ptr + ((size_t(h) * rowStride + size_t(w)) * bytePixelStride);
     }
+
+    __forceinline       char* begin()       { return ptr; }
+    __forceinline const char* begin() const { return ptr; }
+
+    __forceinline       char* end()       { return get(height, 0); }
+    __forceinline const char* end() const { return get(height, 0); }
 
     operator bool() const
     {
       return ptr != nullptr;
     }
+
+    // Determines whether two images overlap in memory
+    bool overlaps(const Image& other) const
+    {
+      if (!ptr || !other.ptr)
+        return false;
+
+      // If the images are backed by different buffers, they cannot overlap
+      if (buffer != other.buffer)
+        return false;
+
+      // Check whether the pointer intervals overlap
+      const char* begin1 = begin();
+      const char* end1   = end();
+      const char* begin2 = other.begin();
+      const char* end2   = other.end();
+
+      return begin1 < end2 && begin2 < end1;
+    }
   };
+
+  inline ispc::Image toIspc(const Image& img)
+  {
+    ispc::Image res;
+    res.ptr = (uint8_t*)img.ptr;
+    res.rowStride = img.rowStride;
+    res.bytePixelStride = img.bytePixelStride;
+    return res;
+  }
 
 } // namespace oidn

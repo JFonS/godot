@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2016-2018 Intel Corporation
+* Copyright 2016-2020 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -16,25 +16,38 @@
 
 #include <assert.h>
 
-#include "mkldnn.h"
+#include "dnnl.h"
 
 #include "c_types_map.hpp"
 #include "engine.hpp"
 #include "primitive_desc.hpp"
-#include "type_helpers.hpp"
 #include "primitive_iterator.hpp"
+#include "type_helpers.hpp"
 
-using namespace mkldnn::impl;
-using namespace mkldnn::impl::status;
+using namespace dnnl::impl;
+using namespace dnnl::impl::status;
 
-status_t mkldnn_primitive_desc_iterator_create(
+status_t dnnl_primitive_desc_iterator_create(
         primitive_desc_iterator_t **iterator, const_c_op_desc_t c_op_desc,
         const primitive_attr_t *attr, engine_t *engine,
-        const primitive_desc_t *hint_fwd_pd) {
+        const primitive_desc_iface_t *hint_fwd_pd) {
     const op_desc_t *op_desc = (const op_desc_t *)c_op_desc;
+    if (utils::any_null(iterator, op_desc, engine)) return invalid_arguments;
 
-    auto it = new primitive_desc_iterator_t(engine, op_desc, attr, hint_fwd_pd);
+    using namespace primitive_kind;
+    bool known_primitive_kind = utils::one_of(op_desc->kind,
+            batch_normalization, binary, convolution, deconvolution, eltwise,
+            gemm, inner_product, layer_normalization, lrn, logsoftmax, matmul,
+            pooling, resampling, rnn, shuffle, softmax);
+    if (!known_primitive_kind) return invalid_arguments;
+
+    auto it = new primitive_desc_iterator_t(engine, op_desc, attr,
+            hint_fwd_pd ? hint_fwd_pd->impl().get() : nullptr);
     if (it == nullptr) return out_of_memory;
+    if (!it->is_initialized()) {
+        delete it;
+        return out_of_memory;
+    }
 
     ++(*it);
     if (*it == it->end()) {
@@ -46,44 +59,60 @@ status_t mkldnn_primitive_desc_iterator_create(
     return success;
 }
 
-status_t mkldnn_primitive_desc_iterator_next(
+status_t dnnl_primitive_desc_iterator_next(
         primitive_desc_iterator_t *iterator) {
     if (iterator == nullptr) return invalid_arguments;
     ++(*iterator);
     return *iterator == iterator->end() ? iterator_ends : success;
 }
 
-primitive_desc_t *mkldnn_primitive_desc_iterator_fetch(
+primitive_desc_iface_t *dnnl_primitive_desc_iterator_fetch(
         const primitive_desc_iterator_t *iterator) {
     if (iterator == nullptr) return nullptr;
-    return *(*iterator);
+    primitive_desc_iface_t *pd
+            = new primitive_desc_iface_t(*(*iterator), iterator->engine());
+    if (pd->impl() == nullptr) {
+        delete pd;
+        return nullptr;
+    }
+    return pd;
 }
 
-status_t mkldnn_primitive_desc_clone(primitive_desc_t **primitive_desc,
-        const primitive_desc_t *existing_primitive_desc) {
-    if (utils::any_null(primitive_desc, existing_primitive_desc))
+status_t dnnl_primitive_desc_clone(
+        primitive_desc_iface_t **primitive_desc_iface,
+        const primitive_desc_iface_t *existing_primitive_desc_iface) {
+    if (utils::any_null(primitive_desc_iface, existing_primitive_desc_iface))
         return invalid_arguments;
-    return safe_ptr_assign<primitive_desc_t>(*primitive_desc,
-            existing_primitive_desc->clone());
+
+    return safe_ptr_assign<primitive_desc_iface_t>(*primitive_desc_iface,
+            new primitive_desc_iface_t(
+                    existing_primitive_desc_iface->impl()->clone(),
+                    existing_primitive_desc_iface->engine()));
 }
 
-status_t mkldnn_primitive_desc_iterator_destroy(
+status_t dnnl_primitive_desc_iterator_destroy(
         primitive_desc_iterator_t *iterator) {
-    if (iterator != nullptr)
-        delete iterator;
+    if (iterator != nullptr) delete iterator;
     return success;
 }
 
-status_t mkldnn_primitive_desc_create(primitive_desc_t **primitive_desc,
+status_t dnnl_primitive_desc_create(
+        primitive_desc_iface_t **primitive_desc_iface,
         const_c_op_desc_t c_op_desc, const primitive_attr_t *attr,
-        engine_t *engine, const primitive_desc_t *hint_fwd_pd) {
-    const op_desc_t *op_desc = (const op_desc_t *)c_op_desc;
+        engine_t *engine, const primitive_desc_iface_t *hint_fwd_pd) {
+    primitive_desc_iterator_t *it;
+    status_t status = dnnl_primitive_desc_iterator_create(
+            &it, c_op_desc, attr, engine, hint_fwd_pd);
+    if (status != status::success) return status;
 
-    mkldnn_primitive_desc_iterator it(engine, op_desc, attr, hint_fwd_pd);
-    ++it;
-    if (it == it.end()) return unimplemented;
+    primitive_desc_iface_t *pd_iface
+            = new primitive_desc_iface_t(it->fetch_once(), engine);
+    dnnl_primitive_desc_iterator_destroy(it);
+    if (pd_iface == nullptr) return out_of_memory;
 
-    return safe_ptr_assign<primitive_desc_t>(*primitive_desc, *it);
+    *primitive_desc_iface = pd_iface;
+
+    return success;
 }
 
-// vim: et ts=4 sw=4 cindent cino^=l0,\:0,N-s
+// vim: et ts=4 sw=4 cindent cino+=l0,\:4,N-s

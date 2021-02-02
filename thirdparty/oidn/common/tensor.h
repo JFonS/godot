@@ -1,47 +1,39 @@
-// ======================================================================== //
-// Copyright 2009-2019 Intel Corporation                                    //
-//                                                                          //
-// Licensed under the Apache License, Version 2.0 (the "License");          //
-// you may not use this file except in compliance with the License.         //
-// You may obtain a copy of the License at                                  //
-//                                                                          //
-//     http://www.apache.org/licenses/LICENSE-2.0                           //
-//                                                                          //
-// Unless required by applicable law or agreed to in writing, software      //
-// distributed under the License is distributed on an "AS IS" BASIS,        //
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. //
-// See the License for the specific language governing permissions and      //
-// limitations under the License.                                           //
-// ======================================================================== //
+// Copyright 2009-2020 Intel Corporation
+// SPDX-License-Identifier: Apache-2.0
 
 #pragma once
 
 #include "platform.h"
 #include <vector>
-#include <map>
 
 namespace oidn {
 
-  template<typename T>
-  using shared_vector = std::shared_ptr<std::vector<T>>;
-
   // Generic tensor
-  struct Tensor
+  class Tensor
   {
+  public:
+    using Dims = std::vector<int64_t>;
+
     float* data;
-    std::vector<int64_t> dims;
-    std::string format;
-    shared_vector<char> buffer; // optional, only for reference counting
+    Dims dims;
+    std::string layout;
+    std::shared_ptr<std::vector<char>> buffer; // optional, only for reference counting
 
     __forceinline Tensor() : data(nullptr) {}
 
-    __forceinline Tensor(const std::vector<int64_t>& dims, const std::string& format)
+    __forceinline Tensor(const Dims& dims, const std::string& layout)
       : dims(dims),
-        format(format)
+        layout(layout)
     {
       buffer = std::make_shared<std::vector<char>>(size() * sizeof(float));
       data = (float*)buffer->data();
     }
+
+    __forceinline Tensor(const Dims& dims, const std::string& layout, float* data)
+      : data(data),
+        dims(dims),
+        layout(layout)
+    {}
 
     __forceinline operator bool() const { return data != nullptr; }
 
@@ -56,11 +48,61 @@ namespace oidn {
       return size;
     }
 
+    // Returns the size in bytes
+    __forceinline size_t byteSize() const
+    {
+      return size() * sizeof(float);
+    }
+
     __forceinline float& operator [](size_t i) { return data[i]; }
     __forceinline const float& operator [](size_t i) const { return data[i]; }
-  };
 
-  // Parses tensors from a buffer
-  std::map<std::string, Tensor> parseTensors(void* buffer);
+    __forceinline float& operator ()(int64_t i0) { return data[getIndex(i0)]; }
+    __forceinline const float& operator ()(int64_t i0) const { return data[getIndex(i0)]; }
+
+    __forceinline float& operator ()(int64_t i0, int64_t i1)
+    { return data[getIndex(i0, i1)]; }
+    __forceinline const float& operator ()(int64_t i0, int64_t i1) const
+    { return data[getIndex(i0, i1)]; }
+
+    __forceinline float& operator ()(int64_t i0, int64_t i1, int64_t i2)
+    { return data[getIndex(i0, i1, i2)]; }
+    __forceinline const float& operator ()(int64_t i0, int64_t i1, int64_t i2) const
+    { return data[getIndex(i0, i1, i2)]; }
+
+    __forceinline float& operator ()(int64_t i0, int64_t i1, int64_t i2, int64_t i3)
+    { return data[getIndex(i0, i1, i2, i3)]; }
+    __forceinline const float& operator ()(int64_t i0, int64_t i1, int64_t i2, int64_t i3) const
+    { return data[getIndex(i0, i1, i2, i3)]; }
+
+  private:
+    __forceinline int64_t getIndex(int64_t i0) const
+    {
+      assert(ndims() == 1);
+      assert(i0 < dims[0]);
+      return i0;
+    }
+
+    __forceinline int64_t getIndex(int64_t i0, int64_t i1) const
+    {
+      assert(ndims() == 2);
+      assert(i0 < dims[0] && i1 < dims[1]);
+      return i0 * dims[1] + i1;
+    }
+
+    __forceinline int64_t getIndex(int64_t i0, int64_t i1, int64_t i2) const
+    {
+      assert(ndims() == 3);
+      assert(i0 < dims[0] && i1 < dims[1] && i2 < dims[2]);
+      return (i0 * dims[1] + i1) * dims[2] + i2;
+    }
+
+    __forceinline int64_t getIndex(int64_t i0, int64_t i1, int64_t i2, int64_t i3) const
+    {
+      assert(ndims() == 4);
+      assert(i0 < dims[0] && i1 < dims[1] && i2 < dims[2] && i3 < dims[3]);
+      return ((i0 * dims[1] + i1) * dims[2] + i2) * dims[3] + i3;
+    }
+  };
 
 } // namespace oidn
