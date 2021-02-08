@@ -1,4 +1,4 @@
-// Copyright 2009-2020 Intel Corporation
+// Copyright 2009-2021 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 
 #include "color.h"
@@ -19,7 +19,7 @@ namespace oidn {
     const int HK = (H + K/2) / K; // downsampled height
     const int WK = (W + K/2) / K; // downsampled width
 
-    ispc::Image colorIspc = toIspc(color);
+    ispc::Image colorIspc = color;
 
     // Compute the average log luminance of the downsampled image
     using Sum = std::pair<float, int>;
@@ -36,27 +36,27 @@ namespace oidn {
     //         for (int j = r.cols().begin(); j != r.cols().end(); ++j)
     //         {
 		Sum sum = Sum(0.0f, 0);
- 		
-		for (int i = 0; i != HK; ++i) 
+
+    for (int i = 0; i != HK; ++i)
 		{
-			 for (int j = 0; j != WK; ++j)
-       {
-				// Compute the average luminance in the current block
-				const int beginH = int(ptrdiff_t(i)   * H / HK);
-				const int beginW = int(ptrdiff_t(j)   * W / WK);
-				const int endH   = int(ptrdiff_t(i+1) * H / HK);
-				const int endW   = int(ptrdiff_t(j+1) * W / WK);
+			for (int j = 0; j != WK; ++j)
+			{
+              // Compute the average luminance in the current block
+              const int beginH = int(ptrdiff_t(i)   * H / HK);
+              const int beginW = int(ptrdiff_t(j)   * W / WK);
+              const int endH   = int(ptrdiff_t(i+1) * H / HK);
+              const int endW   = int(ptrdiff_t(j+1) * W / WK);
 
-				const float L = ispc::getAvgLuminance(colorIspc, beginH, endH, beginW, endW);
+              const float L = ispc::getAvgLuminance(colorIspc, beginH, endH, beginW, endW);
 
-				// Accumulate the log luminance
-				if (L > eps)
-				{
-					sum.first += log2(L);
-					sum.second++;
-				}
-			}
-		}
+              // Accumulate the log luminance
+              if (L > eps)
+              {
+                sum.first += log2(L);
+                sum.second++;
+              }
+            }
+          }
 
       //     return sum;
       //   },

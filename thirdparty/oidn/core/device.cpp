@@ -1,4 +1,4 @@
-// Copyright 2009-2020 Intel Corporation
+// Copyright 2009-2021 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 
 #include "device.h"
@@ -10,13 +10,21 @@ namespace oidn {
 
   Device::Device()
   {
-    if (!mayiuse(sse41))
+  #if defined(OIDN_X64)
+    if (!x64::mayiuse(x64::sse41))
       throw Exception(Error::UnsupportedHardware, "SSE4.1 support is required at minimum");
+  #endif
+
+    // Get default values from environment variables
+    if (getEnvVar("OIDN_VERBOSE", verbose))
+      error.verbose = verbose;
+    getEnvVar("OIDN_NUM_THREADS", numThreads);
+    getEnvVar("OIDN_SET_AFFINITY", setAffinity);
   }
 
   Device::~Device()
   {
-    //observer.reset();
+    // observer.reset();
   }
 
   void Device::setError(Device* device, Error code, const std::string& message)
@@ -88,6 +96,11 @@ namespace oidn {
     errorUserPtr = userPtr;
   }
 
+  void Device::warning(const std::string& message)
+  {
+    OIDN_WARNING(message);
+  }
+
   int Device::get1i(const std::string& name)
   {
     if (name == "numThreads")
@@ -105,20 +118,22 @@ namespace oidn {
     else if (name == "versionPatch")
       return OIDN_VERSION_PATCH;
     else
-      throw Exception(Error::InvalidArgument, "invalid parameter");
+      throw Exception(Error::InvalidArgument, "unknown device parameter");
   }
 
   void Device::set1i(const std::string& name, int value)
   {
-    if (name == "numThreads")
+    if (name == "numThreads" && !isEnvVar("OIDN_NUM_THREADS"))
       numThreads = value;
-    else if (name == "setAffinity")
+    else if (name == "setAffinity" && !isEnvVar("OIDN_SET_AFFINITY"))
       setAffinity = value;
-    else if (name == "verbose")
+    else if (name == "verbose" && !isEnvVar("OIDN_VERBOSE"))
     {
       verbose = value;
       error.verbose = value;
     }
+    else
+      warning("unknown device parameter");
 
     dirty = true;
   }
@@ -128,25 +143,34 @@ namespace oidn {
     if (isCommitted())
       throw Exception(Error::InvalidOperation, "device can be committed only once");
 
-    // Get the optimal thread affinities
-    if (setAffinity)
-    {
-      affinity = std::make_shared<ThreadAffinity>(1, verbose); // one thread per core
-      if (affinity->getNumThreads() == 0)
-        affinity.reset();
-    }
+    // Get the optimal thread affinities (except on Apple Silicon)
+  // #if !(defined(__APPLE__) && defined(OIDN_ARM64))
+  //   if (setAffinity)
+  //   {
+  //     affinity = std::make_shared<ThreadAffinity>(1, verbose); // one thread per core
+  //     if (affinity->getNumThreads() == 0)
+  //       affinity.reset();
+  //   }
+  // #endif
 
     // Create the task arena
     //const int maxNumThreads = affinity ? affinity->getNumThreads() : tbb::this_task_arena::max_concurrency();
-    numThreads = 1 ; //(numThreads > 0) ? min(numThreads, maxNumThreads) : maxNumThreads;
-    // arena = std::make_shared<tbb::task_arena>(numThreads);
+    numThreads = 1; //(numThreads > 0) ? min(numThreads, maxNumThreads) : maxNumThreads;
+    //arena = std::make_shared<tbb::task_arena>(numThreads);
 
     // Automatically set the thread affinities
     //if (affinity)
-    // observer = std::make_shared<PinningObserver>(affinity, *arena);
+    //  observer = std::make_shared<PinningObserver>(affinity, *arena);
 
-    // Initialize DNNL verbosity (unfortunately this is not per-device but global)
-    dnnl_set_verbose(clamp(verbose - 2, 0, 2));
+    // Initialize the neural network runtime
+  #if defined(OIDN_DNNL)
+    dnnl_set_verbose(clamp(verbose - 2, 0, 2)); // unfortunately this is not per-device but global
+    dnnlEngine = dnnl::engine(dnnl::engine::kind::cpu, 0);
+    dnnlStream = dnnl::stream(dnnlEngine);
+    tensorBlockSize = x64::mayiuse(x64::avx512_core) ? 16 : 8;
+  #else
+    tensorBlockSize = 1;
+  #endif
 
     dirty = false;
 
@@ -183,7 +207,8 @@ namespace oidn {
 
     /*if (type == "RT")
       filter = makeRef<RTFilter>(Ref<Device>(this));
-    else*/ if (type == "RTLightmap")
+    else*/
+		if (type == "RTLightmap")
       filter = makeRef<RTLightmapFilter>(Ref<Device>(this));
     else
       throw Exception(Error::InvalidArgument, "unknown filter type");
@@ -201,19 +226,39 @@ namespace oidn {
     std::cout << "  Platform: " << getPlatformName() << std::endl;
 
     std::cout << "  Targets :";
-    if (mayiuse(sse41))       std::cout << " SSE4.1";
-    if (mayiuse(avx2))        std::cout << " AVX2";
-    if (mayiuse(avx512_core)) std::cout << " AVX512SKX";
-    std::cout << " (supported)" << std::endl;
-    std::cout << "            SSE4.1 AVX2 AVX512SKX (compile time enabled)" << std::endl;
-
-    std::cout << "  Tasking :";
-    //std::cout << " TBB" << TBB_VERSION_MAJOR << "." << TBB_VERSION_MINOR;
-  #if TBB_INTERFACE_VERSION >= 12002
-    //std::cout << " TBB_header_interface_" << TBB_INTERFACE_VERSION << " TBB_lib_interface_" << TBB_runtime_interface_version();
-  #else
-    //std::cout << " TBB_header_interface_" << TBB_INTERFACE_VERSION << " TBB_lib_interface_" << tbb::TBB_runtime_interface_version();
+  #if defined(OIDN_X64)
+    if (x64::mayiuse(x64::sse41))       std::cout << " SSE4.1";
+    if (x64::mayiuse(x64::avx2))        std::cout << " AVX2";
+    if (x64::mayiuse(x64::avx512_core)) std::cout << " AVX512";
+  #elif defined(OIDN_ARM64)
+    std::cout << " NEON";
   #endif
+    std::cout << " (supported)" << std::endl;
+    std::cout << "            ";
+  #if defined(OIDN_X64)
+    std::cout << "SSE4.1 AVX2 AVX512";
+  #elif defined(OIDN_ARM64)
+    std::cout << "NEON";
+  #endif
+    std::cout << " (compile time enabled)" << std::endl;
+    
+    std::cout << "  Neural  : ";
+  #if defined(OIDN_DNNL)
+    std::cout << "DNNL (oneDNN) " << DNNL_VERSION_MAJOR << "." <<
+                                     DNNL_VERSION_MINOR << "." <<
+                                     DNNL_VERSION_PATCH;
+  #elif defined(OIDN_BNNS)
+    std::cout << "BNNS";
+  #endif
+    std::cout << std::endl;
+
+  //   std::cout << "  Tasking :";
+  //   std::cout << " TBB" << TBB_VERSION_MAJOR << "." << TBB_VERSION_MINOR;
+  // #if TBB_INTERFACE_VERSION >= 12002
+  //   std::cout << " TBB_header_interface_" << TBB_INTERFACE_VERSION << " TBB_lib_interface_" << TBB_runtime_interface_version();
+  // #else
+  //   std::cout << " TBB_header_interface_" << TBB_INTERFACE_VERSION << " TBB_lib_interface_" << tbb::TBB_runtime_interface_version();
+  // #endif
 
     std::cout << std::endl;
 

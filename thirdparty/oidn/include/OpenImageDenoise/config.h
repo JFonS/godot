@@ -1,15 +1,15 @@
-// Copyright 2009-2020 Intel Corporation
+// Copyright 2009-2021 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 
 #pragma once
 
 #define OIDN_VERSION_MAJOR 1
-#define OIDN_VERSION_MINOR 2
-#define OIDN_VERSION_PATCH 4
-#define OIDN_VERSION 10204
-#define OIDN_VERSION_STRING "1.2.4"
+#define OIDN_VERSION_MINOR 3
+#define OIDN_VERSION_PATCH 0
+#define OIDN_VERSION 10300
+#define OIDN_VERSION_STRING "1.3.0"
 
-#define OIDN_STATIC_LIB
+/* #undef OIDN_STATIC_LIB */
 /* #undef OIDN_API_NAMESPACE */
 
 #if defined(OIDN_API_NAMESPACE)

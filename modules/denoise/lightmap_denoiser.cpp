@@ -45,15 +45,25 @@ Ref<Image> LightmapDenoiserOIDN::denoise_image(const Ref<Image> &p_image) {
 
 	img->convert(Image::FORMAT_RGBF);
 
+	int rand = Math::rand();
+
+	img->save_exr(vformat("pre_denoise_%d.exr", rand), false);
+
 	PoolByteArray data = img->get_data();
 	{
 		PoolByteArray::Write w = data.write();
 		if (!oidn_denoise(device, (float *)w.ptr(), img->get_width(), img->get_height())) {
 			return p_image;
 		}
+
+		float *ptr = (float *)w.ptr();
+		for (int i = 0; i < 100; i++) {
+			print_line(vformat("%d %d -> %s %s %s", i % img->get_width(), i / img->get_width(), ptr[i * 3 + 0], ptr[i * 3 + 1], ptr[i * 3 + 2]));
+		}
 	}
 
 	img->create(img->get_width(), img->get_height(), false, img->get_format(), data);
+	img->save_exr(vformat("post_denoise_%d.exr", rand), false);
 	return img;
 }
 

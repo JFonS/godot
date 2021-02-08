@@ -77,19 +77,19 @@ thirdparty_sources = [
     "mkl-dnn/src/cpu/x64/jit_uni_reorder.cpp",
     "mkl-dnn/src/cpu/x64/jit_uni_reorder_utils.cpp",
     "mkl-dnn/src/cpu/x64/jit_utils/jit_utils.cpp",
+    "mkl-dnn/src/cpu/x64/jit_utils/jitprofiling/jitprofiling.c",
     "mkl-dnn/src/cpu/x64/jit_utils/linux_perf/linux_perf.cpp",
     "core/api.cpp",
     "core/color.cpp",
     "core/device.cpp",
     "core/filter.cpp",
     "core/network.cpp",
+    "core/tza.cpp",
     "core/unet.cpp",
-    "weights/rtlightmap_hdr.gen.cpp",
+    "weights/rtlightmap_hdr.cpp",
+    "weights/rtlightmap_dir.cpp",
     "common/platform.cpp",
-    "common/tasking.cpp",
     "common/thread.cpp",
-    "common/tza.cpp",
-    "mkl-dnn/src/cpu/x64/jit_utils/jitprofiling/jitprofiling.c",
 ]
 thirdparty_sources = [thirdparty_dir + file for file in thirdparty_sources]
 
@@ -106,7 +106,10 @@ thirdparty_include_dirs = [thirdparty_dir + file for file in thirdparty_include_
 
 
 env_oidn.Prepend(CPPPATH=thirdparty_include_dirs)
-env_oidn.Append(CFLAGS=["-D__STDC_CONSTANT_MACROS", "-D__STDC_LIMIT_MACROS", "-DNDEBUG", "-D_FORTIFY_SOURCE=2"])
+env_oidn.Append(
+    CPPDEFINES=["OIDN_DNNL"],
+    CFLAGS=["-D__STDC_CONSTANT_MACROS", "-D__STDC_LIMIT_MACROS", "-DNDEBUG", "-D_FORTIFY_SOURCE=2", "-DOIDN_DNNL"],
+)
 
 env_thirdparty = env_oidn.Clone()
 env_thirdparty.disable_warnings()
@@ -114,6 +117,12 @@ env_thirdparty.add_source_files(env.modules_sources, thirdparty_sources)
 
 weights_in_path = thirdparty_dir + "weights/rtlightmap_hdr.tza"
 weights_out_path = [thirdparty_dir + "weights/rtlightmap_hdr.gen.cpp", thirdparty_dir + "weights/rtlightmap_hdr.gen.h"]
+
+env_thirdparty.Depends(weights_out_path, weights_in_path)
+env_thirdparty.CommandNoCache(weights_out_path, weights_in_path, resource_to_cpp.tza_to_cpp)
+
+weights_in_path = thirdparty_dir + "weights/rtlightmap_dir.tza"
+weights_out_path = [thirdparty_dir + "weights/rtlightmap_dir.gen.cpp", thirdparty_dir + "weights/rtlightmap_dir.gen.h"]
 
 env_thirdparty.Depends(weights_out_path, weights_in_path)
 env_thirdparty.CommandNoCache(weights_out_path, weights_in_path, resource_to_cpp.tza_to_cpp)
@@ -135,7 +144,7 @@ env_thirdparty_ispc = Environment()
 env_thirdparty_ispc.Append(
     BUILDERS={
         "ISPC": Builder(
-            action="ispc $SOURCE --arch=x86-64 --addressing=64 -O3 --target=sse2-i32x8 --woff --opt=fast-math --pic --opt=disable-assertions -o $TARGET",
+            action="ispc $SOURCE --arch=x86-64 --addressing=64 -O3 --target=sse4-i32x8, --woff --opt=fast-math --pic --opt=disable-assertions -o $TARGET",
             suffix=".ispc.o",
             src_suffix=".ispc",
             single_source=True,

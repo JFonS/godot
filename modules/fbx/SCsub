@@ -7,6 +7,7 @@ env_fbx = env_modules.Clone()
 
 # Make includes relative to the folder path specified here so our includes are clean
 env_fbx.Prepend(CPPPATH=["#modules/fbx/"])
+env_fbx.disable_warnings()
 
 # Godot's own source files
 env_fbx.add_source_files(env.modules_sources, "tools/*.cpp")
