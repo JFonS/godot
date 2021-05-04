@@ -74,7 +74,7 @@ cpp_files = [
 
 os.chdir("../../thirdparty")
 
-dir_name = "embree-aarch64"
+dir_name = "embree"
 if os.path.exists(dir_name):
     shutil.rmtree(dir_name)
 

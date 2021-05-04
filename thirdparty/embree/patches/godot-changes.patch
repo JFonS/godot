@@ -1,7 +1,7 @@
-diff --git a/thirdparty/embree-aarch64/common/algorithms/parallel_for.h b/thirdparty/embree-aarch64/common/algorithms/parallel_for.h
+diff --git a/thirdparty/embree/common/algorithms/parallel_for.h b/thirdparty/embree/common/algorithms/parallel_for.h
 index 76c6b740aa..51d296fb16 100644
---- a/thirdparty/embree-aarch64/common/algorithms/parallel_for.h
-+++ b/thirdparty/embree-aarch64/common/algorithms/parallel_for.h
+--- a/thirdparty/embree/common/algorithms/parallel_for.h
++++ b/thirdparty/embree/common/algorithms/parallel_for.h
 @@ -27,7 +27,10 @@ namespace embree
            func(r.begin());
          });
@@ -114,10 +114,10 @@ index 76c6b740aa..51d296fb16 100644
      #endif
    }
  
-diff --git a/thirdparty/embree-aarch64/common/algorithms/parallel_reduce.h b/thirdparty/embree-aarch64/common/algorithms/parallel_reduce.h
+diff --git a/thirdparty/embree/common/algorithms/parallel_reduce.h b/thirdparty/embree/common/algorithms/parallel_reduce.h
 index d444b6a2e4..0daf94e50e 100644
---- a/thirdparty/embree-aarch64/common/algorithms/parallel_reduce.h
-+++ b/thirdparty/embree-aarch64/common/algorithms/parallel_reduce.h
+--- a/thirdparty/embree/common/algorithms/parallel_reduce.h
++++ b/thirdparty/embree/common/algorithms/parallel_reduce.h
 @@ -58,15 +58,19 @@ namespace embree
      const Value v = tbb::parallel_reduce(tbb::blocked_range<Index>(first,last,minStepSize),identity,
        [&](const tbb::blocked_range<Index>& r, const Value& start) { return reduction(start,func(range<Index>(r.begin(),r.end()))); },
@@ -142,10 +142,10 @@ index d444b6a2e4..0daf94e50e 100644
      return v;
    #endif
  #else // TASKING_PPL
-diff --git a/thirdparty/embree-aarch64/common/lexers/stringstream.cpp b/thirdparty/embree-aarch64/common/lexers/stringstream.cpp
+diff --git a/thirdparty/embree/common/lexers/stringstream.cpp b/thirdparty/embree/common/lexers/stringstream.cpp
 index 7e7b9faef8..98dc80ad59 100644
---- a/thirdparty/embree-aarch64/common/lexers/stringstream.cpp
-+++ b/thirdparty/embree-aarch64/common/lexers/stringstream.cpp
+--- a/thirdparty/embree/common/lexers/stringstream.cpp
++++ b/thirdparty/embree/common/lexers/stringstream.cpp
 @@ -39,7 +39,10 @@ namespace embree
      std::vector<char> str; str.reserve(64);
      while (cin->peek() != EOF && !isSeparator(cin->peek())) {
@@ -158,10 +158,10 @@ index 7e7b9faef8..98dc80ad59 100644
        str.push_back((char)c);
      }
      str.push_back(0);
-diff --git a/thirdparty/embree-aarch64/common/sys/alloc.cpp b/thirdparty/embree-aarch64/common/sys/alloc.cpp
+diff --git a/thirdparty/embree/common/sys/alloc.cpp b/thirdparty/embree/common/sys/alloc.cpp
 index 4e8928242e..12f143f131 100644
---- a/thirdparty/embree-aarch64/common/sys/alloc.cpp
-+++ b/thirdparty/embree-aarch64/common/sys/alloc.cpp
+--- a/thirdparty/embree/common/sys/alloc.cpp
++++ b/thirdparty/embree/common/sys/alloc.cpp
 @@ -21,7 +21,10 @@ namespace embree
      void* ptr = _mm_malloc(size,align);
  
@@ -246,10 +246,10 @@ index 4e8928242e..12f143f131 100644
    }
  
    /* hint for transparent huge pages (THP) */
-diff --git a/thirdparty/embree-aarch64/common/sys/platform.h b/thirdparty/embree-aarch64/common/sys/platform.h
+diff --git a/thirdparty/embree/common/sys/platform.h b/thirdparty/embree/common/sys/platform.h
 index 7914eb7a52..737f14aa6e 100644
---- a/thirdparty/embree-aarch64/common/sys/platform.h
-+++ b/thirdparty/embree-aarch64/common/sys/platform.h
+--- a/thirdparty/embree/common/sys/platform.h
++++ b/thirdparty/embree/common/sys/platform.h
 @@ -174,11 +174,19 @@
  #define PRINT4(x,y,z,w) embree_cout << STRING(x) << " = " << (x) << ", " << STRING(y) << " = " << (y) << ", " << STRING(z) << " = " << (z) << ", " << STRING(w) << " = " << (w) << embree_endl
  
@@ -272,10 +272,10 @@ index 7914eb7a52..737f14aa6e 100644
  #endif
  
  #define FATAL(x)   THROW_RUNTIME_ERROR(x)
-diff --git a/thirdparty/embree-aarch64/common/tasking/taskschedulerinternal.cpp b/thirdparty/embree-aarch64/common/tasking/taskschedulerinternal.cpp
+diff --git a/thirdparty/embree/common/tasking/taskschedulerinternal.cpp b/thirdparty/embree/common/tasking/taskschedulerinternal.cpp
 index 98d7fb9249..ebf656d1a0 100644
---- a/thirdparty/embree-aarch64/common/tasking/taskschedulerinternal.cpp
-+++ b/thirdparty/embree-aarch64/common/tasking/taskschedulerinternal.cpp
+--- a/thirdparty/embree/common/tasking/taskschedulerinternal.cpp
++++ b/thirdparty/embree/common/tasking/taskschedulerinternal.cpp
 @@ -48,13 +48,15 @@ namespace embree
      {
        Task* prevTask = thread.task;
@@ -350,10 +350,10 @@ index 98d7fb9249..ebf656d1a0 100644
    }
  
    bool TaskScheduler::steal_from_other_threads(Thread& thread)
-diff --git a/thirdparty/embree-aarch64/common/tasking/taskschedulerinternal.h b/thirdparty/embree-aarch64/common/tasking/taskschedulerinternal.h
+diff --git a/thirdparty/embree/common/tasking/taskschedulerinternal.h b/thirdparty/embree/common/tasking/taskschedulerinternal.h
 index c2a9391aea..8bd70b2b8c 100644
---- a/thirdparty/embree-aarch64/common/tasking/taskschedulerinternal.h
-+++ b/thirdparty/embree-aarch64/common/tasking/taskschedulerinternal.h
+--- a/thirdparty/embree/common/tasking/taskschedulerinternal.h
++++ b/thirdparty/embree/common/tasking/taskschedulerinternal.h
 @@ -123,7 +123,10 @@ namespace embree
        {
          size_t ofs = bytes + ((align - stackPtr) & (align-1));
@@ -390,10 +390,10 @@ index c2a9391aea..8bd70b2b8c 100644
  
      /*! steals a task from a different thread */
      bool steal_from_other_threads(Thread& thread);
-diff --git a/thirdparty/embree-aarch64/kernels/bvh/bvh_statistics.cpp b/thirdparty/embree-aarch64/kernels/bvh/bvh_statistics.cpp
+diff --git a/thirdparty/embree/kernels/bvh/bvh_statistics.cpp b/thirdparty/embree/kernels/bvh/bvh_statistics.cpp
 index 20cdd2d320..aa56035026 100644
---- a/thirdparty/embree-aarch64/kernels/bvh/bvh_statistics.cpp
-+++ b/thirdparty/embree-aarch64/kernels/bvh/bvh_statistics.cpp
+--- a/thirdparty/embree/kernels/bvh/bvh_statistics.cpp
++++ b/thirdparty/embree/kernels/bvh/bvh_statistics.cpp
 @@ -150,7 +150,10 @@ namespace embree
        }
      }
@@ -406,10 +406,10 @@ index 20cdd2d320..aa56035026 100644
      }
      return s;
    } 
-diff --git a/thirdparty/embree-aarch64/kernels/common/rtcore.cpp b/thirdparty/embree-aarch64/kernels/common/rtcore.cpp
+diff --git a/thirdparty/embree/kernels/common/rtcore.cpp b/thirdparty/embree/kernels/common/rtcore.cpp
 index ee5c37b238..625fbf6d4f 100644
---- a/thirdparty/embree-aarch64/kernels/common/rtcore.cpp
-+++ b/thirdparty/embree-aarch64/kernels/common/rtcore.cpp
+--- a/thirdparty/embree/kernels/common/rtcore.cpp
++++ b/thirdparty/embree/kernels/common/rtcore.cpp
 @@ -230,7 +230,10 @@ RTC_NAMESPACE_BEGIN;
      if (quality != RTC_BUILD_QUALITY_LOW &&
          quality != RTC_BUILD_QUALITY_MEDIUM &&
@@ -434,10 +434,10 @@ index ee5c37b238..625fbf6d4f 100644
      geometry->setBuildQuality(quality);
      RTC_CATCH_END2(geometry);
    }
-diff --git a/thirdparty/embree-aarch64/kernels/common/rtcore.h b/thirdparty/embree-aarch64/kernels/common/rtcore.h
+diff --git a/thirdparty/embree/kernels/common/rtcore.h b/thirdparty/embree/kernels/common/rtcore.h
 index 6583d12d57..4b070e122b 100644
---- a/thirdparty/embree-aarch64/kernels/common/rtcore.h
-+++ b/thirdparty/embree-aarch64/kernels/common/rtcore.h
+--- a/thirdparty/embree/kernels/common/rtcore.h
++++ b/thirdparty/embree/kernels/common/rtcore.h
 @@ -25,52 +25,58 @@ namespace embree
  #endif
  
@@ -596,10 +596,10 @@ index 6583d12d57..4b070e122b 100644
  #endif
  
  #define RTC_BUILD_ARGUMENTS_HAS(settings,member) \
-diff --git a/thirdparty/embree-aarch64/kernels/common/scene.cpp b/thirdparty/embree-aarch64/kernels/common/scene.cpp
+diff --git a/thirdparty/embree/kernels/common/scene.cpp b/thirdparty/embree/kernels/common/scene.cpp
 index e75aa968f9..1e23aeb415 100644
---- a/thirdparty/embree-aarch64/kernels/common/scene.cpp
-+++ b/thirdparty/embree-aarch64/kernels/common/scene.cpp
+--- a/thirdparty/embree/kernels/common/scene.cpp
++++ b/thirdparty/embree/kernels/common/scene.cpp
 @@ -800,16 +800,18 @@ namespace embree
      }
  

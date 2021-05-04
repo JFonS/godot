@@ -62,7 +62,7 @@ Files extracted from upstream source:
 Extracted from .zip provided. Extracted license and header only.
 
 
-## embree-aarch64
+## embree
 
 - Upstream: https://github.com/lighttransport/embree-aarch64
 - Version: 3.12.1 (6ef362f99af80c9dfe8dd2bfc582d9067897edc6, 2020)
