@@ -36,7 +36,7 @@
 #include "node_3d_editor_plugin.h"
 #include "scene/resources/curve.h"
 
-String Path3DGizmo::get_handle_name(int p_idx) const {
+String Path3DGizmo::get_handle_name(int p_group_id, int p_idx) const {
 	Ref<Curve3D> c = path->get_curve();
 	if (c.is_null()) {
 		return "";
@@ -60,7 +60,7 @@ String Path3DGizmo::get_handle_name(int p_idx) const {
 	return n;
 }
 
-Variant Path3DGizmo::get_handle_value(int p_idx) {
+Variant Path3DGizmo::get_handle_value(int p_group_id, int p_idx) {
 	Ref<Curve3D> c = path->get_curve();
 	if (c.is_null()) {
 		return Variant();
@@ -88,7 +88,7 @@ Variant Path3DGizmo::get_handle_value(int p_idx) {
 	return ofs;
 }
 
-void Path3DGizmo::set_handle(int p_idx, Camera3D *p_camera, const Point2 &p_point) {
+void Path3DGizmo::set_handle(int p_group_id, int p_idx, Camera3D *p_camera, const Point2 &p_point) {
 	Ref<Curve3D> c = path->get_curve();
 	if (c.is_null()) {
 		return;
@@ -157,7 +157,7 @@ void Path3DGizmo::set_handle(int p_idx, Camera3D *p_camera, const Point2 &p_poin
 	}
 }
 
-void Path3DGizmo::commit_handle(int p_idx, const Variant &p_restore, bool p_cancel) {
+void Path3DGizmo::commit_handle(int p_group_id, int p_idx, const Variant &p_restore, bool p_cancel) {
 	Ref<Curve3D> c = path->get_curve();
 	if (c.is_null()) {
 		return;
@@ -279,10 +279,12 @@ void Path3DGizmo::redraw() {
 			add_lines(v3p, path_thin_material);
 		}
 		if (handles.size()) {
-			add_handles(handles, handles_material);
+			// TODO handles
+			// add_handle_group(handles, handles_material);
 		}
 		if (sec_handles.size()) {
-			add_handles(sec_handles, sec_handles_material, false, true);
+			// TODO handles
+			// add_handle_group(sec_handles, sec_handles_material, false, true);
 		}
 	}
 }

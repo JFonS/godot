@@ -34,20 +34,21 @@
 #include "core/input/input.h"
 #include "core/math/camera_matrix.h"
 #include "core/os/keyboard.h"
-#include "core/string/print_string.h"
+
 #include "core/templates/sort_array.h"
 #include "editor/debugger/editor_debugger_node.h"
 #include "editor/editor_node.h"
-#include "editor/editor_scale.h"
 #include "editor/editor_settings.h"
 #include "editor/node_3d_editor_gizmos.h"
 #include "editor/plugins/animation_player_editor_plugin.h"
 #include "editor/plugins/script_editor_plugin.h"
 #include "scene/3d/camera_3d.h"
 #include "scene/3d/collision_shape_3d.h"
+#include "scene/3d/light_3d.h"
 #include "scene/3d/mesh_instance_3d.h"
 #include "scene/3d/physics_body_3d.h"
 #include "scene/3d/visual_instance_3d.h"
+#include "scene/3d/world_environment.h"
 #include "scene/gui/center_container.h"
 #include "scene/gui/subviewport_container.h"
 #include "scene/resources/packed_scene.h"
@@ -484,11 +485,7 @@ void Node3DEditorViewport::_select(Node *p_node, bool p_append, bool p_single) {
 	}
 }
 
-ObjectID Node3DEditorViewport::_select_ray(const Point2 &p_pos, bool p_append, bool &r_includes_current, int *r_gizmo_handle, bool p_alt_select) {
-	if (r_gizmo_handle) {
-		*r_gizmo_handle = -1;
-	}
-
+ObjectID Node3DEditorViewport::_select_ray(const Point2 &p_pos, bool p_append, bool &r_includes_current, bool p_alt_select) {
 	Vector3 ray = _get_ray(p_pos);
 	Vector3 pos = _get_ray_pos(p_pos);
 	Vector2 shrinked_pos = p_pos / subviewport_container->get_stretch_shrink();
@@ -504,7 +501,6 @@ ObjectID Node3DEditorViewport::_select_ray(const Point2 &p_pos, bool p_append, b
 	ObjectID closest;
 	Node *item = nullptr;
 	float closest_dist = 1e20;
-	int selected_handle = -1;
 
 	for (int i = 0; i < instances.size(); i++) {
 		Node3D *spat = Object::cast_to<Node3D>(ObjectDB::get_instance(instances[i]));
@@ -523,8 +519,7 @@ ObjectID Node3DEditorViewport::_select_ray(const Point2 &p_pos, bool p_append, b
 		Vector3 point;
 		Vector3 normal;
 
-		int handle = -1;
-		bool inters = seg->intersect_ray(camera, shrinked_pos, point, normal, &handle, p_alt_select);
+		bool inters = seg->intersect_ray(camera, shrinked_pos, point, normal);
 
 		if (!inters) {
 			continue;
@@ -544,18 +539,12 @@ ObjectID Node3DEditorViewport::_select_ray(const Point2 &p_pos, bool p_append, b
 
 			closest = item->get_instance_id();
 			closest_dist = dist;
-			selected_handle = handle;
+			//selected_handle = handle;
 		}
 	}
 
 	if (!item) {
 		return ObjectID();
-	}
-
-	if (!editor_selection->is_selected(item) || (r_gizmo_handle && selected_handle >= 0)) {
-		if (r_gizmo_handle) {
-			*r_gizmo_handle = selected_handle;
-		}
 	}
 
 	return closest;
@@ -591,8 +580,7 @@ void Node3DEditorViewport::_find_items_at_pos(const Point2 &p_pos, bool &r_inclu
 		Vector3 point;
 		Vector3 normal;
 
-		int handle = -1;
-		bool inters = seg->intersect_ray(camera, p_pos, point, normal, nullptr, p_alt_select);
+		bool inters = seg->intersect_ray(camera, p_pos, point, normal);
 
 		if (!inters) {
 			continue;
@@ -611,7 +599,7 @@ void Node3DEditorViewport::_find_items_at_pos(const Point2 &p_pos, bool &r_inclu
 		_RayResult res;
 		res.item = spat;
 		res.depth = dist;
-		res.handle = handle;
+		res.handle = -1;
 		results.push_back(res);
 	}
 
@@ -815,7 +803,7 @@ static int _get_key_modifier(Ref<InputEventWithModifiers> e) {
 	return 0;
 }
 
-bool Node3DEditorViewport::_gizmo_select(const Vector2 &p_screenpos, bool p_highlight_only) {
+bool Node3DEditorViewport::_transform_gizmo_select(const Vector2 &p_screenpos, bool p_highlight_only) {
 	if (!spatial_editor->is_gizmo_visible()) {
 		return false;
 	}
@@ -1144,7 +1132,7 @@ void Node3DEditorViewport::_sinput(const Ref<InputEvent> &p_event) {
 
 				if (b->is_pressed() && _edit.gizmo.is_valid()) {
 					//restore
-					_edit.gizmo->commit_handle(_edit.gizmo_handle, _edit.gizmo_initial_value, true);
+					_edit.gizmo->commit_handle(_edit.gizmo_handle_group, _edit.gizmo_handle, _edit.gizmo_initial_value, true);
 					_edit.gizmo = Ref<EditorNode3DGizmo>();
 				}
 
@@ -1259,20 +1247,22 @@ void Node3DEditorViewport::_sinput(const Ref<InputEvent> &p_event) {
 					if (can_select_gizmos && spatial_editor->get_selected()) {
 						Ref<EditorNode3DGizmo> seg = spatial_editor->get_selected()->get_gizmo();
 						if (seg.is_valid()) {
-							int handle = -1;
+							int gizmo_handle = -1;
+							int gizmo_handle_group = -1;
 							Vector3 point;
 							Vector3 normal;
-							bool inters = seg->intersect_ray(camera, _edit.mouse_pos, point, normal, &handle, b->is_shift_pressed());
-							if (inters && handle != -1) {
+							seg->handles_intersect_ray(camera, _edit.mouse_pos, point, gizmo_handle_group, gizmo_handle); // TODO b->is_shift_pressed());
+							if (gizmo_handle_group != -1) {
 								_edit.gizmo = seg;
-								_edit.gizmo_handle = handle;
-								_edit.gizmo_initial_value = seg->get_handle_value(handle);
+								_edit.gizmo_handle = gizmo_handle;
+								_edit.gizmo_handle_group = gizmo_handle_group;
+								_edit.gizmo_initial_value = seg->get_handle_value(gizmo_handle_group, gizmo_handle);
 								break;
 							}
 						}
 					}
 
-					if (_gizmo_select(_edit.mouse_pos)) {
+					if (_transform_gizmo_select(_edit.mouse_pos)) {
 						break;
 					}
 
@@ -1312,9 +1302,7 @@ void Node3DEditorViewport::_sinput(const Ref<InputEvent> &p_event) {
 
 					// todo scale
 
-					int gizmo_handle = -1;
-
-					clicked = _select_ray(b->get_position(), b->is_shift_pressed(), clicked_includes_current, &gizmo_handle, b->is_shift_pressed());
+					clicked = _select_ray(b->get_position(), b->is_shift_pressed(), clicked_includes_current, b->is_shift_pressed());
 
 					//clicking is always deferred to either move or release
 
@@ -1331,23 +1319,10 @@ void Node3DEditorViewport::_sinput(const Ref<InputEvent> &p_event) {
 						cursor.region_end = b->get_position();
 					}
 
-					if (clicked.is_valid() && gizmo_handle >= 0) {
-						Node3D *spa = Object::cast_to<Node3D>(ObjectDB::get_instance(clicked));
-						if (spa) {
-							Ref<EditorNode3DGizmo> seg = spa->get_gizmo();
-							if (seg.is_valid()) {
-								_edit.gizmo = seg;
-								_edit.gizmo_handle = gizmo_handle;
-								_edit.gizmo_initial_value = seg->get_handle_value(gizmo_handle);
-								break;
-							}
-						}
-					}
-
 					surface->update();
 				} else {
 					if (_edit.gizmo.is_valid()) {
-						_edit.gizmo->commit_handle(_edit.gizmo_handle, _edit.gizmo_initial_value, false);
+						_edit.gizmo->commit_handle(_edit.gizmo_handle_group, _edit.gizmo_handle, _edit.gizmo_initial_value, false);
 						_edit.gizmo = Ref<EditorNode3DGizmo>();
 						break;
 					}
@@ -1407,37 +1382,35 @@ void Node3DEditorViewport::_sinput(const Ref<InputEvent> &p_event) {
 		if (spatial_editor->get_selected()) {
 			Ref<EditorNode3DGizmo> seg = spatial_editor->get_selected()->get_gizmo();
 			if (seg.is_valid()) {
-				int selected_handle = -1;
+				int gizmo_handle = -1;
+				int gizmo_handle_group = -1;
 
-				int handle = -1;
 				Vector3 point;
 				Vector3 normal;
-				bool inters = seg->intersect_ray(camera, _edit.mouse_pos, point, normal, &handle, false);
-				if (inters && handle != -1) {
-					selected_handle = handle;
+				seg->handles_intersect_ray(camera, _edit.mouse_pos, point, gizmo_handle_group, gizmo_handle);
+
+				if (gizmo_handle_group != spatial_editor->get_over_gizmo_handle_group() || gizmo_handle != spatial_editor->get_over_gizmo_handle()) {
+					spatial_editor->set_over_gizmo_handle(gizmo_handle_group, gizmo_handle);
+					spatial_editor->get_selected()->update_gizmo();
 				}
 
-				if (selected_handle != spatial_editor->get_over_gizmo_handle()) {
-					spatial_editor->set_over_gizmo_handle(selected_handle);
-					spatial_editor->get_selected()->update_gizmo();
-					if (selected_handle != -1) {
-						spatial_editor->select_gizmo_highlight_axis(-1);
-					}
+				if (gizmo_handle_group != -1) {
+					spatial_editor->select_gizmo_highlight_axis(-1);
 				}
 			}
 		}
 
-		if (spatial_editor->get_over_gizmo_handle() == -1 && !(m->get_button_mask() & 1) && !_edit.gizmo.is_valid()) {
-			_gizmo_select(_edit.mouse_pos, true);
+		if (spatial_editor->get_over_gizmo_handle_group() == -1 && !(m->get_button_mask() & 1) && !_edit.gizmo.is_valid()) {
+			_transform_gizmo_select(_edit.mouse_pos, true);
 		}
 
 		NavigationScheme nav_scheme = (NavigationScheme)EditorSettings::get_singleton()->get("editors/3d/navigation/navigation_scheme").operator int();
 		NavigationMode nav_mode = NAVIGATION_NONE;
 
 		if (_edit.gizmo.is_valid()) {
-			_edit.gizmo->set_handle(_edit.gizmo_handle, camera, m->get_position());
-			Variant v = _edit.gizmo->get_handle_value(_edit.gizmo_handle);
-			String n = _edit.gizmo->get_handle_name(_edit.gizmo_handle);
+			_edit.gizmo->set_handle(_edit.gizmo_handle_group, _edit.gizmo_handle, camera, m->get_position());
+			Variant v = _edit.gizmo->get_handle_value(_edit.gizmo_handle_group, _edit.gizmo_handle);
+			String n = _edit.gizmo->get_handle_name(_edit.gizmo_handle_group, _edit.gizmo_handle);
 			set_message(n + ": " + String(v));
 
 		} else if (m->get_button_mask() & MOUSE_BUTTON_MASK_LEFT) {
@@ -3636,7 +3609,7 @@ Vector3 Node3DEditorViewport::_get_instance_position(const Point2 &p_pos) const 
 
 		Vector3 hit_point;
 		Vector3 hit_normal;
-		bool inters = seg->intersect_ray(camera, p_pos, hit_point, hit_normal, nullptr, false);
+		bool inters = seg->intersect_ray(camera, p_pos, hit_point, hit_normal);
 
 		if (!inters) {
 			continue;
@@ -3957,6 +3930,7 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, Edito
 	_edit.edited_gizmo = 0;
 	_edit.snap = true;
 	_edit.gizmo_handle = 0;
+	_edit.gizmo_handle_group = 0;
 
 	index = p_index;
 	editor = p_editor;
@@ -4931,6 +4905,7 @@ void Node3DEditor::edit(Node3D *p_spatial) {
 
 		selected = p_spatial;
 		over_gizmo_handle = -1;
+		over_gizmo_handle_group = -1;
 
 		if (selected) {
 			Ref<EditorNode3DGizmo> seg = selected->get_gizmo();
@@ -7064,6 +7039,7 @@ Node3DEditor::Node3DEditor(EditorNode *p_editor) {
 	EDITOR_DEF("editors/3d/navigation/show_viewport_rotation_gizmo", true);
 
 	over_gizmo_handle = -1;
+	over_gizmo_handle_group = -1;
 	{
 		//sun popup
 
@@ -7582,35 +7558,35 @@ void EditorNode3DGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 	}
 }
 
-String EditorNode3DGizmoPlugin::get_handle_name(const EditorNode3DGizmo *p_gizmo, int p_idx) const {
+String EditorNode3DGizmoPlugin::get_handle_name(const EditorNode3DGizmo *p_gizmo, int p_group_id, int p_idx) const {
 	if (get_script_instance() && get_script_instance()->has_method("get_handle_name")) {
-		return get_script_instance()->call("get_handle_name", p_gizmo, p_idx);
+		return get_script_instance()->call("get_handle_name", p_gizmo, p_group_id, p_idx);
 	}
 	return "";
 }
 
-Variant EditorNode3DGizmoPlugin::get_handle_value(EditorNode3DGizmo *p_gizmo, int p_idx) const {
+Variant EditorNode3DGizmoPlugin::get_handle_value(EditorNode3DGizmo *p_gizmo, int p_group_id, int p_idx) const {
 	if (get_script_instance() && get_script_instance()->has_method("get_handle_value")) {
-		return get_script_instance()->call("get_handle_value", p_gizmo, p_idx);
+		return get_script_instance()->call("get_handle_value", p_gizmo, p_group_id, p_idx);
 	}
 	return Variant();
 }
 
-void EditorNode3DGizmoPlugin::set_handle(EditorNode3DGizmo *p_gizmo, int p_idx, Camera3D *p_camera, const Point2 &p_point) {
+void EditorNode3DGizmoPlugin::set_handle(EditorNode3DGizmo *p_gizmo, int p_group_id, int p_idx, Camera3D *p_camera, const Point2 &p_point) {
 	if (get_script_instance() && get_script_instance()->has_method("set_handle")) {
-		get_script_instance()->call("set_handle", p_gizmo, p_idx, p_camera, p_point);
+		get_script_instance()->call("set_handle", p_gizmo, p_group_id, p_idx, p_camera, p_point);
 	}
 }
 
-void EditorNode3DGizmoPlugin::commit_handle(EditorNode3DGizmo *p_gizmo, int p_idx, const Variant &p_restore, bool p_cancel) {
+void EditorNode3DGizmoPlugin::commit_handle(EditorNode3DGizmo *p_gizmo, int p_group_id, int p_idx, const Variant &p_restore, bool p_cancel) {
 	if (get_script_instance() && get_script_instance()->has_method("commit_handle")) {
-		get_script_instance()->call("commit_handle", p_gizmo, p_idx, p_restore, p_cancel);
+		get_script_instance()->call("commit_handle", p_gizmo, p_group_id, p_idx, p_restore, p_cancel);
 	}
 }
 
-bool EditorNode3DGizmoPlugin::is_handle_highlighted(const EditorNode3DGizmo *p_gizmo, int p_idx) const {
+bool EditorNode3DGizmoPlugin::is_handle_highlighted(const EditorNode3DGizmo *p_gizmo, int p_group_id, int p_idx) const {
 	if (get_script_instance() && get_script_instance()->has_method("is_handle_highlighted")) {
-		return get_script_instance()->call("is_handle_highlighted", p_gizmo, p_idx);
+		return get_script_instance()->call("is_handle_highlighted", p_gizmo, p_group_id, p_idx);
 	}
 	return false;
 }

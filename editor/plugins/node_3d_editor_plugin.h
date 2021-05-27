@@ -34,12 +34,6 @@
 #include "editor/editor_node.h"
 #include "editor/editor_plugin.h"
 #include "editor/editor_scale.h"
-#include "scene/3d/immediate_geometry_3d.h"
-#include "scene/3d/light_3d.h"
-#include "scene/3d/visual_instance_3d.h"
-#include "scene/3d/world_environment.h"
-#include "scene/gui/panel_container.h"
-#include "scene/resources/environment.h"
 #include "scene/resources/sky_material.h"
 
 class Camera3D;
@@ -47,77 +41,105 @@ class Node3DEditor;
 class EditorNode3DGizmoPlugin;
 class Node3DEditorViewport;
 class SubViewportContainer;
+class DirectionalLight3D;
+class WorldEnvironment;
 
 class EditorNode3DGizmo : public Node3DGizmo {
 	GDCLASS(EditorNode3DGizmo, Node3DGizmo);
-
-	bool selected;
-	bool instanced;
-
-public:
-	void set_selected(bool p_selected) { selected = p_selected; }
-	bool is_selected() const { return selected; }
 
 	struct Instance {
 		RID instance;
 		Ref<ArrayMesh> mesh;
 		Ref<Material> material;
 		Ref<SkinReference> skin_reference;
-		RID skeleton;
-		bool billboard = false;
-		bool unscaled = false;
-		bool can_intersect = false;
 		bool extra_margin = false;
 
 		void create_instance(Node3D *p_base, bool p_hidden = false);
 	};
 
+	//	enum HandleTransformFlags {
+	//		HANDLE_TRANSFORM_NONE = 0,
+	//		HANDLE_TRANSFORM_MOVE = 1,
+	//		HANDLE_TRANSFORM_ROTATE = 2,
+	//		HANDLE_TRANSFORM_SCALE = 4,
+	//		HANDLE_TRANSFORM_ALL = HANDLE_TRANSFORM_MOVE | HANDLE_TRANSFORM_ROTATE | HANDLE_TRANSFORM_SCALE;
+	//	};
+
+	struct HandleGroup {
+		friend EditorNode3DGizmo;
+
+	private:
+		Vector<Vector3> positions;
+		Vector<int> ids;
+
+	public:
+		bool billboard = false;
+		Ref<Material> material;
+
+		void add_handle(Vector3 p_position, int p_id) {
+			if (!positions.is_empty() && ids.is_empty()) {
+				positions.clear();
+			}
+			positions.push_back(p_position);
+			ids.push_back(p_id);
+		}
+
+		void add_handles(const Vector<Vector3> &p_handles) {
+			if (!ids.is_empty()) {
+				ids.clear();
+				positions.clear();
+			}
+			positions.append_array(p_handles);
+		}
+	};
+
+	bool selected;
+	bool instanced;
+
 	Vector<Vector3> collision_segments;
 	Ref<TriangleMesh> collision_mesh;
 
-	struct Handle {
-		Vector3 pos;
-		bool billboard = false;
-	};
+	Map<int, HandleGroup> handle_groups;
 
-	Vector<Vector3> handles;
-	Vector<Vector3> secondary_handles;
 	float selectable_icon_size;
 	bool billboard_handle;
 
 	bool valid;
 	bool hidden;
-	Node3D *base;
 	Vector<Instance> instances;
 	Node3D *spatial_node;
-	EditorNode3DGizmoPlugin *gizmo_plugin;
 
 	void _set_spatial_node(Node *p_node) { set_spatial_node(Object::cast_to<Node3D>(p_node)); }
 
 protected:
 	static void _bind_methods();
 
+	EditorNode3DGizmoPlugin *gizmo_plugin;
+
 public:
 	void add_lines(const Vector<Vector3> &p_lines, const Ref<Material> &p_material, bool p_billboard = false, const Color &p_modulate = Color(1, 1, 1));
 	void add_vertices(const Vector<Vector3> &p_vertices, const Ref<Material> &p_material, Mesh::PrimitiveType p_primitive_type, bool p_billboard = false, const Color &p_modulate = Color(1, 1, 1));
-	void add_mesh(const Ref<ArrayMesh> &p_mesh, bool p_billboard = false, const Ref<SkinReference> &p_skin_reference = Ref<SkinReference>(), const Ref<Material> &p_material = Ref<Material>());
+	void add_mesh(const Ref<ArrayMesh> &p_mesh, const Ref<Material> &p_material = Ref<Material>(), bool p_billboard = false, const Ref<SkinReference> &p_skin_reference = Ref<SkinReference>());
 	void add_collision_segments(const Vector<Vector3> &p_lines);
 	void add_collision_triangles(const Ref<TriangleMesh> &p_tmesh);
 	void add_unscaled_billboard(const Ref<Material> &p_material, float p_scale = 1, const Color &p_modulate = Color(1, 1, 1));
-	void add_handles(const Vector<Vector3> &p_handles, const Ref<Material> &p_material, bool p_billboard = false, bool p_secondary = false);
+	void add_handle_group(int p_group_id, const Ref<Material> &p_material, const Vector<Vector3> &p_positions, const Vector<int> &p_ids = Vector<int>(), bool p_billboard = false);
 	void add_solid_box(Ref<Material> &p_material, Vector3 p_size, Vector3 p_position = Vector3());
 
-	virtual bool is_handle_highlighted(int p_idx) const;
-	virtual String get_handle_name(int p_idx) const;
-	virtual Variant get_handle_value(int p_idx);
-	virtual void set_handle(int p_idx, Camera3D *p_camera, const Point2 &p_point);
-	virtual void commit_handle(int p_idx, const Variant &p_restore, bool p_cancel = false);
+	virtual bool is_handle_highlighted(int p_group_id, int p_idx) const;
+	virtual String get_handle_name(int p_group_id, int p_idx) const;
+	virtual Variant get_handle_value(int p_group_id, int p_idx);
+	virtual void set_handle(int p_group_id, int p_idx, Camera3D *p_camera, const Point2 &p_point);
+	virtual void commit_handle(int p_group_id, int p_idx, const Variant &p_restore, bool p_cancel = false);
+
+	void set_selected(bool p_selected) { selected = p_selected; }
+	bool is_selected() const { return selected; }
 
 	void set_spatial_node(Node3D *p_node);
 	Node3D *get_spatial_node() const { return spatial_node; }
 	Ref<EditorNode3DGizmoPlugin> get_plugin() const { return gizmo_plugin; }
-	Vector3 get_handle_pos(int p_idx) const;
 	bool intersect_frustum(const Camera3D *p_camera, const Vector<Plane> &p_frustum);
+	void handles_intersect_ray(Camera3D *p_camera, const Point2 &p_point, Vector3 &r_pos, int &r_group_id, int &r_idx);
 	bool intersect_ray(Camera3D *p_camera, const Point2 &p_point, Vector3 &r_pos, Vector3 &r_normal, int *r_gizmo_handle = nullptr, bool p_sec_first = false);
 
 	virtual void clear() override;
@@ -317,7 +339,7 @@ private:
 	void _clear_selected();
 	void _select_clicked(bool p_append, bool p_single, bool p_allow_locked = false);
 	void _select(Node *p_node, bool p_append, bool p_single);
-	ObjectID _select_ray(const Point2 &p_pos, bool p_append, bool &r_includes_current, int *r_gizmo_handle = nullptr, bool p_alt_select = false);
+	ObjectID _select_ray(const Point2 &p_pos, bool p_append, bool &r_includes_current, bool p_alt_select = false);
 	void _find_items_at_pos(const Point2 &p_pos, bool &r_includes_current, Vector<_RayResult> &results, bool p_alt_select = false);
 	Vector3 _get_ray_pos(const Vector2 &p_pos) const;
 	Vector3 _get_ray(const Vector2 &p_pos) const;
@@ -330,7 +352,7 @@ private:
 	Vector3 _get_screen_to_space(const Vector3 &p_vector3);
 
 	void _select_region();
-	bool _gizmo_select(const Vector2 &p_screenpos, bool p_highlight_only = false);
+	bool _transform_gizmo_select(const Vector2 &p_screenpos, bool p_highlight_only = false);
 
 	void _nav_pan(Ref<InputEventWithModifiers> p_event, const Vector2 &p_relative);
 	void _nav_zoom(Ref<InputEventWithModifiers> p_event, const Vector2 &p_relative);
@@ -390,6 +412,7 @@ private:
 		bool snap = false;
 		Ref<EditorNode3DGizmo> gizmo;
 		int gizmo_handle = 0;
+		int gizmo_handle_group = 0;
 		Variant gizmo_initial_value;
 		Vector3 gizmo_initial_pos;
 	} _edit;
@@ -620,6 +643,7 @@ private:
 	Ref<ShaderMaterial> rotate_gizmo_color_hl[3];
 
 	int over_gizmo_handle;
+	int over_gizmo_handle_group;
 	float snap_translate_value;
 	float snap_rotate_value;
 	float snap_scale_value;
@@ -690,7 +714,6 @@ private:
 	LineEdit *snap_translate;
 	LineEdit *snap_rotate;
 	LineEdit *snap_scale;
-	PanelContainer *menu_panel;
 
 	LineEdit *xform_translate[3];
 	LineEdit *xform_rotate[3];
@@ -863,8 +886,13 @@ public:
 
 	Node3D *get_selected() { return selected; }
 
+	void set_over_gizmo_handle(int p_group_id, int p_idx) {
+		over_gizmo_handle_group = p_group_id;
+		over_gizmo_handle = p_idx;
+	}
+
 	int get_over_gizmo_handle() const { return over_gizmo_handle; }
-	void set_over_gizmo_handle(int idx) { over_gizmo_handle = idx; }
+	int get_over_gizmo_handle_group() const { return over_gizmo_handle_group; }
 
 	void set_can_preview(Camera3D *p_preview);
 
@@ -943,11 +971,11 @@ public:
 	virtual bool is_selectable_when_hidden() const;
 
 	virtual void redraw(EditorNode3DGizmo *p_gizmo);
-	virtual String get_handle_name(const EditorNode3DGizmo *p_gizmo, int p_idx) const;
-	virtual Variant get_handle_value(EditorNode3DGizmo *p_gizmo, int p_idx) const;
-	virtual void set_handle(EditorNode3DGizmo *p_gizmo, int p_idx, Camera3D *p_camera, const Point2 &p_point);
-	virtual void commit_handle(EditorNode3DGizmo *p_gizmo, int p_idx, const Variant &p_restore, bool p_cancel = false);
-	virtual bool is_handle_highlighted(const EditorNode3DGizmo *p_gizmo, int p_idx) const;
+	virtual String get_handle_name(const EditorNode3DGizmo *p_gizmo, int p_group_id, int p_idx) const;
+	virtual Variant get_handle_value(EditorNode3DGizmo *p_gizmo, int p_group_id, int p_idx) const;
+	virtual void set_handle(EditorNode3DGizmo *p_gizmo, int p_group_id, int p_idx, Camera3D *p_camera, const Point2 &p_point);
+	virtual void commit_handle(EditorNode3DGizmo *p_gizmo, int p_group_id, int p_idx, const Variant &p_restore, bool p_cancel = false);
+	virtual bool is_handle_highlighted(const EditorNode3DGizmo *p_gizmo, int p_group_id, int p_idx) const;
 
 	Ref<EditorNode3DGizmo> get_gizmo(Node3D *p_spatial);
 	void set_state(int p_state);
